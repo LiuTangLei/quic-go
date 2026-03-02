@@ -265,8 +265,15 @@ func NewBBRSender(clock Clock, rttStats *utils.RTTStats, initialMaxDatagramSize 
 		maxDatagramSize:           initialMaxDatagramSize,
 	}
 
-	// Initialize pacer with bandwidth estimate function
-	b.pacer = newPacer(b.BandwidthEstimate)
+	// Initialize pacer with pacing rate function (not raw bandwidth estimate)
+	// The pacing rate includes the pacing gain and handles startup properly
+	b.pacer = newPacer(func() Bandwidth {
+		if b.pacingRate > 0 {
+			return b.pacingRate
+		}
+		// Fallback to bandwidth estimate if pacing rate not set yet
+		return b.BandwidthEstimate()
+	})
 
 	return b
 }
@@ -290,6 +297,11 @@ func (b *bbrSender) OnPacketSent(sentTime monotime.Time, bytesInFlight protocol.
 
 	if b.aggregationEpochStartTime.IsZero() {
 		b.aggregationEpochStartTime = sentTime
+	}
+
+	// Initialize pacing rate on first packet if not already set
+	if b.pacingRate == 0 {
+		b.CalculatePacingRate()
 	}
 
 	b.sampler.OnPacketSent(sentTime, packetNumber, bytes, bytesInFlight, isRetransmittable)
@@ -325,6 +337,13 @@ func (b *bbrSender) OnPacketAcked(number protocol.PacketNumber, ackedBytes proto
 	if !bandwidthSample.stateAtSend.isValid {
 		// Packet was never sent or already processed
 		return
+	}
+
+	// Debug logging for startup performance issues
+	if b.mode == STARTUP && b.roundTripCount < 20 {
+		_ = bandwidthSample // Placeholder for potential debug logging
+		// In production, you could log: RTT=%d, BW=%d Mbps, CWND=%d, Round=%d, Mode=%d
+		// eventTime, bandwidthSample.bandwidth/125000, b.congestionWindow, b.roundTripCount, b.mode
 	}
 
 	b.lastSampleIsAppLimited = bandwidthSample.stateAtSend.isAppLimited
@@ -655,18 +674,28 @@ func (b *bbrSender) OnExitStartup(now monotime.Time) {
 }
 
 func (b *bbrSender) CalculatePacingRate() {
-	if b.BandwidthEstimate() == 0 {
+	bwEstimate := b.BandwidthEstimate()
+
+	// Initialize pacing rate early in the connection
+	if b.pacingRate == 0 {
+		rtt := b.rttStats.MinRTT()
+		if rtt == 0 {
+			// Use initial RTT estimate if no samples yet
+			rtt = InitialRtt
+		}
+		b.pacingRate = BandwidthFromDelta(b.initialCongestionWindow, rtt)
+		// Apply startup gain to initial pacing rate
+		b.pacingRate = Bandwidth(b.pacingGain * float64(b.pacingRate))
 		return
 	}
 
-	targetRate := Bandwidth(b.pacingGain * float64(b.BandwidthEstimate()))
+	if bwEstimate == 0 {
+		return
+	}
+
+	targetRate := Bandwidth(b.pacingGain * float64(bwEstimate))
 	if b.isAtFullBandwidth {
 		b.pacingRate = targetRate
-		return
-	}
-
-	if b.pacingRate == 0 && b.rttStats.MinRTT() > 0 {
-		b.pacingRate = BandwidthFromDelta(b.initialCongestionWindow, b.rttStats.MinRTT())
 		return
 	}
 
