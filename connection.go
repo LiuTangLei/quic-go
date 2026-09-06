@@ -2515,6 +2515,7 @@ func (c *Conn) triggerSending(now monotime.Time) error {
 }
 
 func (c *Conn) sendPackets(now monotime.Time) error {
+	defer c.maybeNotifyApplicationLimited()
 	if c.perspective == protocol.PerspectiveClient && c.handshakeConfirmed {
 		if pm := c.pathManagerOutgoing.Load(); pm != nil {
 			connID, frame, tr, ok := pm.NextPathToProbe()

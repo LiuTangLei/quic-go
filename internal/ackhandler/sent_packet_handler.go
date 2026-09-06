@@ -172,6 +172,12 @@ func NewSentPacketHandler(
 	return h
 }
 
+func (h *sentPacketHandler) OnApplicationLimited() {
+	if c, ok := h.congestion.(interface{ OnApplicationLimited(protocol.ByteCount) }); ok {
+		c.OnApplicationLimited(h.bytesInFlight)
+	}
+}
+
 func (h *sentPacketHandler) congestionPacketNumber(pn protocol.PacketNumber, p *packet) protocol.PacketNumber {
 	if h.useBBR {
 		return p.congestionNumber

@@ -346,6 +346,15 @@ func (b *bbrSender) GetCongestionWindow() protocol.ByteCount {
 	return b.congestionWindow
 }
 
+func (b *bbrSender) OnApplicationLimited(flight protocol.ByteCount) {
+	if flight >= b.GetCongestionWindow() {
+		return
+	}
+	b.sampler.OnAppLimited()
+	b.appLimitedSinceLastProbeRtt = true
+	b.connStats.ApplicationLimitedRTTSamples.Add(1)
+}
+
 func (b *bbrSender) MaybeExitSlowStart(_ protocol.ByteCount) {
 	// BBR does not use traditional slow start exit
 }
