@@ -29,6 +29,9 @@ func validateConfig(config *Config) error {
 	if config.EnableBBR && config.EnableCubic {
 		return fmt.Errorf("select one congestion controller, not both BBR and CUBIC")
 	}
+	if config.ClientHelloProfile != "" && config.ClientHelloProfile != "chromium-h3" {
+		return fmt.Errorf("unsupported ClientHello profile %q", config.ClientHelloProfile)
+	}
 	const maxStreams = 1 << 60
 	if config.MaxIncomingStreams > maxStreams {
 		config.MaxIncomingStreams = maxStreams
@@ -109,6 +112,7 @@ func populateConfig(config *Config) *Config {
 	}
 
 	return &Config{
+		ClientHelloProfile:               config.ClientHelloProfile,
 		EnableBBR:                        config.EnableBBR,
 		GetConfigForClient:               config.GetConfigForClient,
 		EnableCubic:                      config.EnableCubic,

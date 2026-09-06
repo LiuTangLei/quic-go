@@ -493,6 +493,7 @@ var newClientConnection = func(
 		s.qlogger,
 		logger,
 		s.version,
+		s.config.ClientHelloProfile,
 	)
 	s.cryptoStreamHandler = cs
 	s.cryptoStreamManager = newCryptoStreamManager(s.initialStream, s.handshakeStream, oneRTTStream)
@@ -780,6 +781,9 @@ func (c *Conn) ConnectionState() ConnectionState {
 
 	cs := c.cryptoStreamHandler.ConnectionState()
 	c.connState.TLS = cs.ConnectionState
+	if c.perspective == protocol.PerspectiveClient {
+		c.connState.ClientHelloProfile = c.config.ClientHelloProfile
+	}
 	c.connState.Used0RTT = cs.Used0RTT
 	if c.peerParams != nil {
 		c.connState.SupportsDatagrams.Remote = c.supportsDatagrams()

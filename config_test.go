@@ -88,6 +88,8 @@ func configWithNonZeroNonFunctionFields(t *testing.T) *Config {
 		switch fn := typ.Field(i).Name; fn {
 		case "GetConfigForClient", "RequireAddressValidation", "GetLogWriter", "AllowConnectionWindowIncrease", "Tracer", "Congestion":
 			// Can't compare functions.
+		case "ClientHelloProfile":
+			f.Set(reflect.ValueOf("chromium-h3"))
 		case "Versions":
 			f.Set(reflect.ValueOf([]Version{1, 2, 3}))
 		case "ConnectionIDLength":

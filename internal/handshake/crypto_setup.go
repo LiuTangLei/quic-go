@@ -27,7 +27,8 @@ const clientSessionStateRevision = 5
 
 type cryptoSetup struct {
 	tlsConf *tls.Config
-	conn    *tls.QUICConn
+	conn    quicTLSConn
+	initErr error
 
 	events []Event
 
@@ -76,6 +77,7 @@ func NewCryptoSetupClient(
 	qlogger qlogwriter.Recorder,
 	logger utils.Logger,
 	version protocol.Version,
+	clientHelloProfile ...string,
 ) CryptoSetup {
 	cs := newCryptoSetup(
 		connID,
@@ -91,10 +93,21 @@ func NewCryptoSetupClient(
 	cs.tlsConf = tlsConf
 	cs.allow0RTT = enable0RTT
 
-	cs.conn = tls.QUICClient(&tls.QUICConfig{
+	cs.conn = standardQUICConn{tls.QUICClient(&tls.QUICConfig{
 		TLSConfig:           tlsConf,
 		EnableSessionEvents: true,
-	})
+	})}
+	if len(clientHelloProfile) > 0 && clientHelloProfile[0] != "" {
+		if enable0RTT {
+			cs.initErr = errors.New("browser QUIC ClientHello does not support 0-RTT")
+		} else {
+			var customized quicTLSConn
+			customized, cs.initErr = newBrowserQUICConn(tlsConf, clientHelloProfile[0])
+			if cs.initErr == nil {
+				cs.conn = customized
+			}
+		}
+	}
 	cs.conn.SetTransportParameters(cs.ourParams.Marshal(protocol.PerspectiveClient))
 
 	return cs
@@ -126,7 +139,7 @@ func NewCryptoSetupServer(
 	tlsConf = setupConfigForServer(tlsConf, localAddr, remoteAddr)
 
 	cs.tlsConf = tlsConf
-	cs.conn = tls.QUICServer(getQUICConfig(tlsConf, localAddr, remoteAddr))
+	cs.conn = standardQUICConn{tls.QUICServer(getQUICConfig(tlsConf, localAddr, remoteAddr))}
 	return cs
 }
 
@@ -185,6 +198,9 @@ func (h *cryptoSetup) SetLargest1RTTAcked(pn protocol.PacketNumber) error {
 }
 
 func (h *cryptoSetup) StartHandshake(ctx context.Context) error {
+	if h.initErr != nil {
+		return h.initErr
+	}
 	err := h.conn.Start(context.WithValue(ctx, QUICVersionContextKey, h.version))
 	if err != nil {
 		return wrapError(err)
@@ -681,6 +697,7 @@ func (h *cryptoSetup) Get1RTTOpener() (ShortHeaderOpener, error) {
 func (h *cryptoSetup) ConnectionState() ConnectionState {
 	return ConnectionState{
 		ConnectionState: h.conn.ConnectionState(),
+		Exporter:        h.conn.ExportKeyingMaterial,
 		Used0RTT:        h.used0RTT.Load(),
 	}
 }

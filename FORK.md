@@ -7,6 +7,10 @@ Do not point a release at an unpublished tag or a local filesystem replacement.
 
 ## Changes
 
+* Optional per-connection `chromium-h3` uTLS ClientHello and a public, safe
+  `Conn.ExportKeyingMaterial` bridge. Ordinary clients and all TLS servers keep
+  crypto/tls. See CLIENTHELLO.md for exact scope and non-browser-matching limits.
+
 * Bounded receive rings: 1024 transport DATAGRAMs / 2 MiB, 256 HTTP Datagrams.
   Local receive drops are reported separately from network loss. The send queue
   remains bounded and datagrams remain unreliable.

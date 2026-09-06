@@ -100,6 +100,12 @@ type ConnectionIDGenerator interface {
 
 // Config contains all configuration data needed for a QUIC server or client.
 type Config struct {
+	// ClientHelloProfile selects a per-connection client-only TLS handshake.
+	// Empty uses crypto/tls. "chromium-h3" uses a Chromium-inspired uTLS
+	// ClientHello, with actual QUIC parameters and the normal CID/packet layer.
+	// It does not claim an exact browser version fingerprint. Resumption and
+	// ECH are intentionally not supported in this initial adapter.
+	ClientHelloProfile string
 	// EnableCubic selects CUBIC for this connection instead of the upstream
 	// Reno default. It is a local congestion policy, not a wire extension.
 	// Defaults to false; used by high-BDP datagram tunnels in this fork.
@@ -207,6 +213,9 @@ type ClientInfo struct {
 
 // ConnectionState records basic details about a QUIC connection.
 type ConnectionState struct {
+	// ClientHelloProfile is the actual local client handshake implementation.
+	// It is empty on the ordinary crypto/tls path and on servers.
+	ClientHelloProfile string
 	// TLS contains information about the TLS connection state, incl. the tls.ConnectionState.
 	TLS tls.ConnectionState
 	// SupportsDatagrams indicates support for QUIC datagrams (RFC 9221).
