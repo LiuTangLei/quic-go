@@ -107,6 +107,7 @@ type sentPacketHandler struct {
 	ecnTracker ecnHandler
 
 	perspective protocol.Perspective
+	useCubic    bool
 
 	qlogger     qlogwriter.Recorder
 	lastMetrics qlog.MetricsUpdated
@@ -128,13 +129,15 @@ func NewSentPacketHandler(
 	pers protocol.Perspective,
 	qlogger qlogwriter.Recorder,
 	logger utils.Logger,
+	cubicOption ...bool,
 ) SentPacketHandler {
+	useCubic := len(cubicOption) != 0 && cubicOption[0]
 	congestion := congestion.NewCubicSender(
 		congestion.DefaultClock{},
 		rttStats,
 		connStats,
 		initialMaxDatagramSize,
-		true, // use Reno
+		!useCubic, // retain Reno by default; opt-in CUBIC for datagram tunnels
 		qlogger,
 	)
 
@@ -148,6 +151,7 @@ func NewSentPacketHandler(
 		rttStats:                       rttStats,
 		connStats:                      connStats,
 		congestion:                     congestion,
+		useCubic:                       useCubic,
 		ignorePacketsBelow:             ignorePacketsBelow,
 		perspective:                    pers,
 		qlogger:                        qlogger,
@@ -166,6 +170,7 @@ func (h *sentPacketHandler) removeFromBytesInFlight(p *packet) {
 			panic("negative bytes_in_flight")
 		}
 		h.bytesInFlight -= p.Length
+		h.connStats.BytesInFlight.Store(uint64(h.bytesInFlight))
 		p.includedInBytesInFlight = false
 	}
 }
@@ -292,6 +297,7 @@ func (h *sentPacketHandler) SentPacket(
 	if isAckEliciting {
 		pnSpace.lastAckElicitingPacketTime = t
 		h.bytesInFlight += size
+		h.connStats.BytesInFlight.Store(uint64(h.bytesInFlight))
 		p.includedInBytesInFlight = true
 		if h.numProbesToSend > 0 {
 			h.numProbesToSend--
@@ -417,7 +423,7 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 				}
 				h.largestAckedTime = p.SendTime
 			}
-			h.congestion.MaybeExitSlowStart()
+			h.congestion.MaybeExitSlowStart(priorInFlight)
 		}
 	}
 
@@ -1136,7 +1142,7 @@ func (h *sentPacketHandler) MigratedPath(now monotime.Time, initialMaxDatagramSi
 		h.rttStats,
 		h.connStats,
 		initialMaxDatagramSize,
-		true, // use Reno
+		!h.useCubic,
 		h.qlogger,
 	)
 	h.setLossDetectionTimer(now)

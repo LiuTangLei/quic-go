@@ -320,6 +320,7 @@ var newConnection = func(
 		s.perspective,
 		s.qlogger,
 		s.logger,
+		s.config.EnableCubic,
 	)
 	s.maxPayloadSizeEstimate.Store(uint32(estimateMaxPayloadSize(protocol.ByteCount(s.config.InitialPacketSize))))
 	statelessResetToken := statelessResetter.GetStatelessResetToken(srcConnID)
@@ -449,6 +450,7 @@ var newClientConnection = func(
 		s.perspective,
 		s.qlogger,
 		s.logger,
+		s.config.EnableCubic,
 	)
 	s.maxPayloadSizeEstimate.Store(uint32(estimateMaxPayloadSize(protocol.ByteCount(s.config.InitialPacketSize))))
 	oneRTTStream := newCryptoStream()
@@ -824,21 +826,40 @@ type ConnectionStats struct {
 	// (does not monotonically increase, because packets that are declared lost
 	// can subsequently be received).
 	PacketsLost uint64
+
+	// Congestion diagnostics are independent atomic snapshots, not a single
+	// transaction. They do not contain payloads or keys.
+	CongestionControl            string
+	CongestionWindow             uint64
+	BytesInFlight                uint64
+	SlowStart                    bool
+	SlowStartExits               uint64
+	ApplicationLimitedRTTSamples uint64
 }
 
 func (c *Conn) ConnectionStats() ConnectionStats {
+	controller := "reno"
+	if c.config.EnableCubic {
+		controller = "cubic"
+	}
 	return ConnectionStats{
-		MinRTT:        c.rttStats.MinRTT(),
-		LatestRTT:     c.rttStats.LatestRTT(),
-		SmoothedRTT:   c.rttStats.SmoothedRTT(),
-		MeanDeviation: c.rttStats.MeanDeviation(),
+		CongestionControl: controller,
+		MinRTT:            c.rttStats.MinRTT(),
+		LatestRTT:         c.rttStats.LatestRTT(),
+		SmoothedRTT:       c.rttStats.SmoothedRTT(),
+		MeanDeviation:     c.rttStats.MeanDeviation(),
 
-		BytesSent:       c.connStats.BytesSent.Load(),
-		PacketsSent:     c.connStats.PacketsSent.Load(),
-		BytesReceived:   c.connStats.BytesReceived.Load(),
-		PacketsReceived: c.connStats.PacketsReceived.Load(),
-		BytesLost:       c.connStats.BytesLost.Load(),
-		PacketsLost:     c.connStats.PacketsLost.Load(),
+		BytesSent:                    c.connStats.BytesSent.Load(),
+		PacketsSent:                  c.connStats.PacketsSent.Load(),
+		BytesReceived:                c.connStats.BytesReceived.Load(),
+		PacketsReceived:              c.connStats.PacketsReceived.Load(),
+		BytesLost:                    c.connStats.BytesLost.Load(),
+		PacketsLost:                  c.connStats.PacketsLost.Load(),
+		CongestionWindow:             c.connStats.CongestionWindow.Load(),
+		BytesInFlight:                c.connStats.BytesInFlight.Load(),
+		SlowStart:                    c.connStats.SlowStart.Load(),
+		SlowStartExits:               c.connStats.SlowStartExits.Load(),
+		ApplicationLimitedRTTSamples: c.connStats.ApplicationLimitedRTTSamples.Load(),
 	}
 }
 

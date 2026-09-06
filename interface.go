@@ -100,6 +100,11 @@ type ConnectionIDGenerator interface {
 
 // Config contains all configuration data needed for a QUIC server or client.
 type Config struct {
+	// EnableCubic selects CUBIC for this connection instead of the upstream
+	// Reno default. It is a local congestion policy, not a wire extension.
+	// Defaults to false; used by high-BDP datagram tunnels in this fork.
+	EnableCubic bool
+
 	// GetConfigForClient is called for incoming connections.
 	// If the error is not nil, the connection attempt is refused.
 	GetConfigForClient func(info *ClientInfo) (*Config, error)

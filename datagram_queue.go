@@ -1,52 +1,42 @@
+// Derived from quic-go v0.62.0. See LICENSE.
+// Bounded receive ring and local drop accounting; wire semantics are unchanged.
 package quic
 
 import (
 	"context"
-	"sync"
-
 	"github.com/quic-go/quic-go/internal/utils"
 	"github.com/quic-go/quic-go/internal/utils/ringbuffer"
 	"github.com/quic-go/quic-go/internal/wire"
+	"sync"
 )
 
 const (
-	maxDatagramSendQueueLen = 32
-	maxDatagramRcvQueueLen  = 128
+	maxDatagramSendQueueLen            = 32
+	maxDatagramRcvQueueLen             = 1024
+	maxDatagramRcvQueueBytes           = 2 << 20
+	TunnelDatagramReceiveQueueCapacity = maxDatagramRcvQueueLen
 )
 
 type datagramQueue struct {
-	sendMx    sync.Mutex
-	sendQueue ringbuffer.RingBuffer[*wire.DatagramFrame]
-	sent      chan struct{} // used to notify Add that a datagram was dequeued
-
-	rcvMx    sync.Mutex
-	rcvQueue [][]byte
-	rcvd     chan struct{} // used to notify Receive that a new datagram was received
-
-	closeErr error
-	closed   chan struct{}
-
-	hasData func()
-
-	logger utils.Logger
+	sendMx                     sync.Mutex
+	sendQueue                  ringbuffer.RingBuffer[*wire.DatagramFrame]
+	sent                       chan struct{}
+	rcvMx                      sync.Mutex
+	rcvQueue                   [][]byte
+	rcvHead, rcvSize, rcvBytes int
+	rcvDrops                   uint64
+	rcvd                       chan struct{}
+	closeErr                   error
+	closed                     chan struct{}
+	hasData                    func()
+	logger                     utils.Logger
 }
 
 func newDatagramQueue(hasData func(), logger utils.Logger) *datagramQueue {
-	return &datagramQueue{
-		hasData: hasData,
-		rcvd:    make(chan struct{}, 1),
-		sent:    make(chan struct{}, 1),
-		closed:  make(chan struct{}),
-		logger:  logger,
-	}
+	return &datagramQueue{hasData: hasData, rcvd: make(chan struct{}, 1), sent: make(chan struct{}, 1), closed: make(chan struct{}), logger: logger}
 }
-
-// Add queues a new DATAGRAM frame for sending.
-// Up to 32 DATAGRAM frames will be queued.
-// Once that limit is reached, Add blocks until the queue size has reduced.
 func (h *datagramQueue) Add(f *wire.DatagramFrame) error {
 	h.sendMx.Lock()
-
 	for {
 		if h.sendQueue.Len() < maxDatagramSendQueueLen {
 			h.sendQueue.PushBack(f)
@@ -55,7 +45,7 @@ func (h *datagramQueue) Add(f *wire.DatagramFrame) error {
 			return nil
 		}
 		select {
-		case <-h.sent: // drain the queue so we don't loop immediately
+		case <-h.sent:
 		default:
 		}
 		h.sendMx.Unlock()
@@ -67,9 +57,6 @@ func (h *datagramQueue) Add(f *wire.DatagramFrame) error {
 		h.sendMx.Lock()
 	}
 }
-
-// Peek gets the next DATAGRAM frame for sending.
-// If actually sent out, Pop needs to be called before the next call to Peek.
 func (h *datagramQueue) Peek() *wire.DatagramFrame {
 	h.sendMx.Lock()
 	defer h.sendMx.Unlock()
@@ -78,7 +65,6 @@ func (h *datagramQueue) Peek() *wire.DatagramFrame {
 	}
 	return h.sendQueue.PeekFront()
 }
-
 func (h *datagramQueue) Pop() {
 	h.sendMx.Lock()
 	defer h.sendMx.Unlock()
@@ -88,34 +74,39 @@ func (h *datagramQueue) Pop() {
 	default:
 	}
 }
-
-// HandleDatagramFrame handles a received DATAGRAM frame.
 func (h *datagramQueue) HandleDatagramFrame(f *wire.DatagramFrame) {
+	h.rcvMx.Lock()
+	if h.rcvSize >= maxDatagramRcvQueueLen || len(f.Data) > maxDatagramRcvQueueBytes-h.rcvBytes {
+		h.rcvDrops++
+		h.rcvMx.Unlock()
+		if h.logger.Debug() {
+			h.logger.Debugf("Discarding received DATAGRAM frame (%d bytes payload)", len(f.Data))
+		}
+		return
+	}
 	data := make([]byte, len(f.Data))
 	copy(data, f.Data)
-	var queued bool
-	h.rcvMx.Lock()
-	if len(h.rcvQueue) < maxDatagramRcvQueueLen {
-		h.rcvQueue = append(h.rcvQueue, data)
-		queued = true
-		select {
-		case h.rcvd <- struct{}{}:
-		default:
-		}
+	if h.rcvQueue == nil {
+		h.rcvQueue = make([][]byte, maxDatagramRcvQueueLen)
+	}
+	h.rcvQueue[(h.rcvHead+h.rcvSize)%maxDatagramRcvQueueLen] = data
+	h.rcvSize++
+	h.rcvBytes += len(data)
+	select {
+	case h.rcvd <- struct{}{}:
+	default:
 	}
 	h.rcvMx.Unlock()
-	if !queued && h.logger.Debug() {
-		h.logger.Debugf("Discarding received DATAGRAM frame (%d bytes payload)", len(f.Data))
-	}
 }
-
-// Receive gets a received DATAGRAM frame.
 func (h *datagramQueue) Receive(ctx context.Context) ([]byte, error) {
 	for {
 		h.rcvMx.Lock()
-		if len(h.rcvQueue) > 0 {
-			data := h.rcvQueue[0]
-			h.rcvQueue = h.rcvQueue[1:]
+		if h.rcvSize > 0 {
+			data := h.rcvQueue[h.rcvHead]
+			h.rcvQueue[h.rcvHead] = nil
+			h.rcvHead = (h.rcvHead + 1) % maxDatagramRcvQueueLen
+			h.rcvSize--
+			h.rcvBytes -= len(data)
 			h.rcvMx.Unlock()
 			return data, nil
 		}
@@ -130,8 +121,16 @@ func (h *datagramQueue) Receive(ctx context.Context) ([]byte, error) {
 		}
 	}
 }
+func (h *datagramQueue) CloseWithError(e error) { h.closeErr = e; close(h.closed) }
 
-func (h *datagramQueue) CloseWithError(e error) {
-	h.closeErr = e
-	close(h.closed)
+// DatagramReceiveQueueStats distinguishes local unreliable-delivery loss from
+// transport loss. Returned values never contain keys or payloads.
+func (c *Conn) DatagramReceiveQueueStats() (queued, queuedBytes int, dropped uint64) {
+	q := c.datagramQueue
+	if q == nil {
+		return 0, 0, 0
+	}
+	q.rcvMx.Lock()
+	defer q.rcvMx.Unlock()
+	return q.rcvSize, q.rcvBytes, q.rcvDrops
 }

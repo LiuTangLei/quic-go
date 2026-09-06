@@ -116,7 +116,7 @@ func configWithNonZeroNonFunctionFields(t *testing.T) *Config {
 			f.Set(reflect.ValueOf(&StatelessResetKey{1, 2, 3, 4}))
 		case "KeepAlivePeriod":
 			f.Set(reflect.ValueOf(time.Second))
-		case "EnableDatagrams":
+		case "EnableDatagrams", "EnableCubic":
 			f.Set(reflect.ValueOf(true))
 		case "DisableVersionNegotiationPackets":
 			f.Set(reflect.ValueOf(true))

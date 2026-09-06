@@ -9,7 +9,10 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-const streamDatagramQueueLen = 32
+const streamDatagramQueueLen = 256
+
+// TunnelDatagramQueueCapacity reports the compiled bounded receive queue.
+const TunnelDatagramQueueCapacity = streamDatagramQueueLen
 
 // stateTrackingStream is an implementation of quic.Stream that delegates
 // to an underlying stream
@@ -23,7 +26,9 @@ type stateTrackingStream struct {
 
 	sendDatagram func([]byte) error
 	hasData      chan struct{}
-	queue        [][]byte // TODO: use a ring buffer
+	queue        [][]byte
+	queueHead    int
+	queueSize    int
 
 	mx      sync.Mutex
 	sendErr error
@@ -146,19 +151,25 @@ func (s *stateTrackingStream) enqueueDatagram(data []byte) {
 	if s.recvErr != nil {
 		return
 	}
-	if len(s.queue) >= streamDatagramQueueLen {
+	if s.queueSize >= streamDatagramQueueLen {
 		return
 	}
-	s.queue = append(s.queue, data)
+	if s.queue == nil {
+		s.queue = make([][]byte, streamDatagramQueueLen)
+	}
+	s.queue[(s.queueHead+s.queueSize)%streamDatagramQueueLen] = data
+	s.queueSize++
 	s.signalHasDatagram()
 }
 
 func (s *stateTrackingStream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
 start:
 	s.mx.Lock()
-	if len(s.queue) > 0 {
-		data := s.queue[0]
-		s.queue = s.queue[1:]
+	if s.queueSize > 0 {
+		data := s.queue[s.queueHead]
+		s.queue[s.queueHead] = nil
+		s.queueHead = (s.queueHead + 1) % streamDatagramQueueLen
+		s.queueSize--
 		s.mx.Unlock()
 		return data, nil
 	}

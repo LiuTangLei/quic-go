@@ -114,6 +114,7 @@ func newCubicSender(
 		maxDatagramSize:            initialMaxDatagramSize,
 	}
 	c.pacer = newPacer(c.BandwidthEstimate)
+	c.updateStats()
 	if c.qlogger != nil {
 		c.lastState = qlog.CongestionStateSlowStart
 		c.qlogger.RecordEvent(qlog.CongestionStateUpdated{
@@ -171,11 +172,21 @@ func (c *cubicSender) GetCongestionWindow() protocol.ByteCount {
 	return c.congestionWindow
 }
 
-func (c *cubicSender) MaybeExitSlowStart() {
+func (c *cubicSender) MaybeExitSlowStart(priorInFlight protocol.ByteCount) {
+	// An underfilled window cannot attribute an RTT increase to its own
+	// window growth. This matters for long-lived datagram tunnels: a stream
+	// of small inner ACKs otherwise leaves reverse bulk in Reno avoidance
+	// before it has ever filled the window. Do not accumulate mixed samples.
+	if !c.isCwndLimited(priorInFlight) {
+		c.hybridSlowStart.Restart()
+		c.connStats.ApplicationLimitedRTTSamples.Add(1)
+		return
+	}
 	if c.InSlowStart() &&
 		c.hybridSlowStart.ShouldExitSlowStart(c.rttStats.LatestRTT(), c.rttStats.MinRTT(), c.GetCongestionWindow()/c.maxDatagramSize) {
 		// exit slow start
 		c.slowStartThreshold = c.congestionWindow
+		c.connStats.SlowStartExits.Add(1)
 		c.maybeQlogStateChange(qlog.CongestionStateCongestionAvoidance)
 	}
 }
@@ -186,6 +197,7 @@ func (c *cubicSender) OnPacketAcked(
 	priorInFlight protocol.ByteCount,
 	eventTime monotime.Time,
 ) {
+	defer c.updateStats()
 	c.largestAckedPacketNumber = max(ackedPacketNumber, c.largestAckedPacketNumber)
 	if c.InRecovery() {
 		return
@@ -197,6 +209,7 @@ func (c *cubicSender) OnPacketAcked(
 }
 
 func (c *cubicSender) OnCongestionEvent(packetNumber protocol.PacketNumber, lostBytes, priorInFlight protocol.ByteCount) {
+	defer c.updateStats()
 	c.connStats.PacketsLost.Add(1)
 	c.connStats.BytesLost.Add(uint64(lostBytes))
 
@@ -286,6 +299,7 @@ func (c *cubicSender) BandwidthEstimate() Bandwidth {
 
 // OnRetransmissionTimeout is called on an retransmission timeout
 func (c *cubicSender) OnRetransmissionTimeout(packetsRetransmitted bool) {
+	defer c.updateStats()
 	c.largestSentAtLastCutback = protocol.InvalidPacketNumber
 	if !packetsRetransmitted {
 		return
@@ -298,6 +312,7 @@ func (c *cubicSender) OnRetransmissionTimeout(packetsRetransmitted bool) {
 
 // OnConnectionMigration is called when the connection is migrated (?)
 func (c *cubicSender) OnConnectionMigration() {
+	defer c.updateStats()
 	c.hybridSlowStart.Restart()
 	c.largestSentPacketNumber = protocol.InvalidPacketNumber
 	c.largestAckedPacketNumber = protocol.InvalidPacketNumber
@@ -317,7 +332,13 @@ func (c *cubicSender) maybeQlogStateChange(new qlog.CongestionState) {
 	c.lastState = new
 }
 
+func (c *cubicSender) updateStats() {
+	c.connStats.CongestionWindow.Store(uint64(c.congestionWindow))
+	c.connStats.SlowStart.Store(c.InSlowStart())
+}
+
 func (c *cubicSender) SetMaxDatagramSize(s protocol.ByteCount) {
+	defer c.updateStats()
 	if s < c.maxDatagramSize {
 		panic(fmt.Sprintf("congestion BUG: decreased max datagram size from %d to %d", c.maxDatagramSize, s))
 	}
