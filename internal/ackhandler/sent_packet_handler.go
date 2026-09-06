@@ -106,8 +106,10 @@ type sentPacketHandler struct {
 	enableECN  bool
 	ecnTracker ecnHandler
 
-	perspective protocol.Perspective
-	useCubic    bool
+	perspective        protocol.Perspective
+	useCubic           bool
+	useBBR             bool
+	congestionSequence protocol.PacketNumber
 
 	qlogger     qlogwriter.Recorder
 	lastMetrics qlog.MetricsUpdated
@@ -132,7 +134,9 @@ func NewSentPacketHandler(
 	cubicOption ...bool,
 ) SentPacketHandler {
 	useCubic := len(cubicOption) != 0 && cubicOption[0]
-	congestion := congestion.NewCubicSender(
+	useBBR := len(cubicOption) > 1 && cubicOption[1]
+	var controller congestion.SendAlgorithmWithDebugInfos
+	controller = congestion.NewCubicSender(
 		congestion.DefaultClock{},
 		rttStats,
 		connStats,
@@ -141,6 +145,9 @@ func NewSentPacketHandler(
 		qlogger,
 	)
 
+	if useBBR {
+		controller = congestion.NewBBRSender(congestion.DefaultClock{}, rttStats, initialMaxDatagramSize, connStats)
+	}
 	h := &sentPacketHandler{
 		peerCompletedAddressValidation: pers == protocol.PerspectiveServer,
 		peerAddressValidated:           pers == protocol.PerspectiveClient || clientAddressValidated,
@@ -150,7 +157,8 @@ func NewSentPacketHandler(
 		lostPackets:                    *newLostPacketTracker(64),
 		rttStats:                       rttStats,
 		connStats:                      connStats,
-		congestion:                     congestion,
+		congestion:                     controller,
+		useBBR:                         useBBR,
 		useCubic:                       useCubic,
 		ignorePacketsBelow:             ignorePacketsBelow,
 		perspective:                    pers,
@@ -162,6 +170,19 @@ func NewSentPacketHandler(
 		h.ecnTracker = newECNTracker(logger, qlogger)
 	}
 	return h
+}
+
+func (h *sentPacketHandler) congestionPacketNumber(pn protocol.PacketNumber, p *packet) protocol.PacketNumber {
+	if h.useBBR {
+		return p.congestionNumber
+	}
+	return pn
+}
+
+func (h *sentPacketHandler) discardCongestionPacket(p *packet) {
+	if c, ok := h.congestion.(interface{ OnPacketDiscarded(protocol.PacketNumber) }); ok {
+		c.OnPacketDiscarded(p.congestionNumber)
+	}
 }
 
 func (h *sentPacketHandler) removeFromBytesInFlight(p *packet) {
@@ -189,6 +210,7 @@ func (h *sentPacketHandler) DropPackets(encLevel protocol.EncryptionLevel, now m
 			return
 		}
 		for _, p := range pnSpace.history.Packets() {
+			h.discardCongestionPacket(p)
 			h.removeFromBytesInFlight(p)
 		}
 	}
@@ -211,6 +233,7 @@ func (h *sentPacketHandler) DropPackets(encLevel protocol.EncryptionLevel, now m
 			if p.EncryptionLevel != protocol.Encryption0RTT {
 				break
 			}
+			h.discardCongestionPacket(p)
 			h.removeFromBytesInFlight(p)
 			h.appDataPackets.history.Remove(pn)
 		}
@@ -303,7 +326,9 @@ func (h *sentPacketHandler) SentPacket(
 			h.numProbesToSend--
 		}
 	}
-	h.congestion.OnPacketSent(t, h.bytesInFlight, pn, size, isAckEliciting)
+	h.congestionSequence++
+	p.congestionNumber = h.congestionSequence
+	h.congestion.OnPacketSent(t, h.bytesInFlight, h.congestionPacketNumber(pn, p), size, isAckEliciting)
 
 	if encLevel == protocol.Encryption1RTT && h.ecnTracker != nil {
 		h.ecnTracker.SentPacket(pn, ecn)
@@ -431,7 +456,11 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 	if encLevel == protocol.Encryption1RTT && h.ecnTracker != nil && largestAcked > pnSpace.largestAcked {
 		congested := h.ecnTracker.HandleNewlyAcked(ackedPackets, int64(ack.ECT0), int64(ack.ECT1), int64(ack.ECNCE))
 		if congested {
-			h.congestion.OnCongestionEvent(largestAcked, 0, priorInFlight)
+			cg := largestAcked
+			if h.useBBR {
+				cg = ackedPackets[len(ackedPackets)-1].congestionNumber
+			}
+			h.congestion.OnCongestionEvent(cg, 0, priorInFlight)
 		}
 	}
 
@@ -444,7 +473,7 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 	var acked1RTTPacket bool
 	for _, p := range ackedPackets {
 		if p.includedInBytesInFlight {
-			h.congestion.OnPacketAcked(p.PacketNumber, p.Length, priorInFlight, rcvTime)
+			h.congestion.OnPacketAcked(h.congestionPacketNumber(p.PacketNumber, p.packet), p.Length, priorInFlight, rcvTime)
 		}
 		if p.EncryptionLevel == protocol.Encryption1RTT {
 			acked1RTTPacket = true
@@ -860,7 +889,9 @@ func (h *sentPacketHandler) detectLostPackets(now monotime.Time, encLevel protoc
 				h.removeFromBytesInFlight(p)
 				h.queueFramesForRetransmission(p)
 				if !p.IsPathMTUProbePacket {
-					h.congestion.OnCongestionEvent(pn, p.Length, priorInFlight)
+					h.congestion.OnCongestionEvent(h.congestionPacketNumber(pn, p), p.Length, priorInFlight)
+				} else {
+					h.discardCongestionPacket(p)
 				}
 				if encLevel == protocol.Encryption1RTT && h.ecnTracker != nil {
 					h.ecnTracker.LostPacket(pn)
@@ -1145,5 +1176,8 @@ func (h *sentPacketHandler) MigratedPath(now monotime.Time, initialMaxDatagramSi
 		!h.useCubic,
 		h.qlogger,
 	)
+	if h.useBBR {
+		h.congestion = congestion.NewBBRSender(congestion.DefaultClock{}, h.rttStats, initialMaxDatagramSize, h.connStats)
+	}
 	h.setLossDetectionTimer(now)
 }

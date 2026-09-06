@@ -26,6 +26,9 @@ func validateConfig(config *Config) error {
 	if config == nil {
 		return nil
 	}
+	if config.EnableBBR && config.EnableCubic {
+		return fmt.Errorf("select one congestion controller, not both BBR and CUBIC")
+	}
 	const maxStreams = 1 << 60
 	if config.MaxIncomingStreams > maxStreams {
 		config.MaxIncomingStreams = maxStreams
@@ -106,6 +109,7 @@ func populateConfig(config *Config) *Config {
 	}
 
 	return &Config{
+		EnableBBR:                        config.EnableBBR,
 		GetConfigForClient:               config.GetConfigForClient,
 		EnableCubic:                      config.EnableCubic,
 		Versions:                         versions,

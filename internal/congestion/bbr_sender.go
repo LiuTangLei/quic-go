@@ -102,9 +102,11 @@ const (
 )
 
 type bbrSender struct {
-	mode     bbrMode
-	clock    Clock
-	rttStats *utils.RTTStats
+	mode            bbrMode
+	clock           Clock
+	rttStats        *utils.RTTStats
+	connStats       *utils.ConnectionStats
+	liveFlightStats bool
 	// Pacer for pacing packets
 	pacer *pacer
 	// Maximum datagram size
@@ -237,7 +239,7 @@ var (
 	_ SendAlgorithmWithDebugInfos = &bbrSender{}
 )
 
-func NewBBRSender(clock Clock, rttStats *utils.RTTStats, initialMaxDatagramSize protocol.ByteCount) *bbrSender {
+func NewBBRSender(clock Clock, rttStats *utils.RTTStats, initialMaxDatagramSize protocol.ByteCount, stats ...*utils.ConnectionStats) *bbrSender {
 	initialCongestionWindow := 32 * initialMaxDatagramSize
 	maxCongestionWindow := protocol.MaxCongestionWindowPackets * initialMaxDatagramSize
 
@@ -251,7 +253,7 @@ func NewBBRSender(clock Clock, rttStats *utils.RTTStats, initialMaxDatagramSize 
 		congestionWindow:          initialCongestionWindow,
 		initialCongestionWindow:   initialCongestionWindow,
 		maxCongestionWindow:       maxCongestionWindow,
-		minCongestionWindow:       DefaultMinimumCongestionWindow,
+		minCongestionWindow:       4 * initialMaxDatagramSize,
 		highGain:                  DefaultHighGain,
 		highCwndGain:              DefaultHighGain,
 		drainGain:                 1.0 / DefaultHighGain,
@@ -265,6 +267,11 @@ func NewBBRSender(clock Clock, rttStats *utils.RTTStats, initialMaxDatagramSize 
 		maxDatagramSize:           initialMaxDatagramSize,
 	}
 
+	b.connStats = new(utils.ConnectionStats)
+	if len(stats) != 0 && stats[0] != nil {
+		b.connStats = stats[0]
+		b.liveFlightStats = true
+	}
 	// Initialize pacer with pacing rate function (not raw bandwidth estimate)
 	// The pacing rate includes the pacing gain and handles startup properly
 	b.pacer = newPacer(func() Bandwidth {
@@ -275,6 +282,11 @@ func NewBBRSender(clock Clock, rttStats *utils.RTTStats, initialMaxDatagramSize 
 		return b.BandwidthEstimate()
 	})
 
+	// BBR already applies its phase gain to pacingRate. Do not apply the
+	// generic Reno/CUBIC pacer's additional 25% headroom a second time.
+	b.pacer.adjustedBandwidth = func() uint64 { return uint64(b.pacingRate / BytesPerSecond) }
+	b.pacer.SetMaxDatagramSize(initialMaxDatagramSize)
+	b.updateStats()
 	return b
 }
 
@@ -291,7 +303,16 @@ func (b *bbrSender) OnPacketSent(sentTime monotime.Time, bytesInFlight protocol.
 	b.lastSendPacket = packetNumber
 	b.bytesInFlight = bytesInFlight
 
-	if bytesInFlight == 0 && b.sampler.isAppLimited {
+	// quic-go passes flight INCLUDING this packet. The sampler requires
+	// prior flight, especially for the first packet after an idle interval.
+	priorFlight := bytesInFlight
+	if isRetransmittable {
+		priorFlight = max(0, priorFlight-bytes)
+	}
+	if priorFlight == 0 && b.sampler.totalBytesSent > 0 {
+		b.sampler.OnAppLimited()
+	}
+	if priorFlight == 0 && b.sampler.isAppLimited {
 		b.exitingQuiescence = true
 	}
 
@@ -304,7 +325,7 @@ func (b *bbrSender) OnPacketSent(sentTime monotime.Time, bytesInFlight protocol.
 		b.CalculatePacingRate()
 	}
 
-	b.sampler.OnPacketSent(sentTime, packetNumber, bytes, bytesInFlight, isRetransmittable)
+	b.sampler.OnPacketSent(sentTime, packetNumber, bytes, priorFlight, isRetransmittable)
 	b.pacer.SentPacket(sentTime, bytes)
 }
 
@@ -325,11 +346,16 @@ func (b *bbrSender) GetCongestionWindow() protocol.ByteCount {
 	return b.congestionWindow
 }
 
-func (b *bbrSender) MaybeExitSlowStart() {
+func (b *bbrSender) MaybeExitSlowStart(_ protocol.ByteCount) {
 	// BBR does not use traditional slow start exit
 }
 
 func (b *bbrSender) OnPacketAcked(number protocol.PacketNumber, ackedBytes protocol.ByteCount, priorInFlight protocol.ByteCount, eventTime monotime.Time) {
+	defer b.updateStats()
+	b.bytesInFlight = max(0, priorInFlight-ackedBytes)
+	if b.liveFlightStats {
+		b.bytesInFlight = max(0, protocol.ByteCount(b.connStats.BytesInFlight.Load())-ackedBytes)
+	}
 	totalBytesAckedBefore := b.sampler.totalBytesAcked
 
 	// Get bandwidth sample
@@ -390,8 +416,17 @@ func (b *bbrSender) OnPacketAcked(number protocol.PacketNumber, ackedBytes proto
 }
 
 func (b *bbrSender) OnCongestionEvent(number protocol.PacketNumber, lostBytes protocol.ByteCount, priorInFlight protocol.ByteCount) {
+	defer b.updateStats()
+	b.connStats.PacketsLost.Add(1)
+	b.connStats.BytesLost.Add(uint64(lostBytes))
+	b.bytesInFlight = max(0, priorInFlight-lostBytes)
+	if b.liveFlightStats {
+		b.bytesInFlight = protocol.ByteCount(b.connStats.BytesInFlight.Load())
+	}
 	// Handle packet loss
-	b.sampler.OnPacketLost(number)
+	if lostBytes > 0 {
+		b.sampler.OnPacketLost(number)
+	}
 
 	if b.mode == STARTUP && b.startupRateReductionMultiplier != 0 {
 		b.startupBytesLost += lostBytes
@@ -404,9 +439,23 @@ func (b *bbrSender) OnCongestionEvent(number protocol.PacketNumber, lostBytes pr
 	b.CalculateRecoveryWindow(0, lostBytes)
 }
 
+// OnPacketDiscarded releases sampling state when QUIC drops a packet number
+// space or a PMTU probe. Those events are not congestion losses.
+func (b *bbrSender) OnPacketDiscarded(number protocol.PacketNumber) {
+	b.sampler.connectionStats.Remove(number)
+}
+
 func (b *bbrSender) SetMaxDatagramSize(size protocol.ByteCount) {
+	if size < b.maxDatagramSize {
+		panic("BBR: decreased packet size without path reset")
+	}
 	b.maxDatagramSize = size
+	b.minCongestionWindow = 4 * size
+	b.initialCongestionWindow = 32 * size
+	b.maxCongestionWindow = protocol.MaxCongestionWindowPackets * size
+	b.congestionWindow = max(b.minCongestionWindow, min(b.congestionWindow, b.maxCongestionWindow))
 	b.pacer.SetMaxDatagramSize(size)
+	b.updateStats()
 }
 
 func (b *bbrSender) OnRetransmissionTimeout(packetsRetransmitted bool) {
@@ -491,7 +540,7 @@ func (b *bbrSender) ShouldExtendMinRttExpiry() bool {
 
 func (b *bbrSender) UpdateRecoveryState(lastAckedPacket protocol.PacketNumber, hasLosses, isRoundStart bool) {
 	// Exit recovery when there are no losses for a round.
-	if !hasLosses {
+	if hasLosses {
 		b.endRecoveryAt = b.lastSendPacket
 	}
 	switch b.recoveryState {
@@ -670,7 +719,12 @@ func (b *bbrSender) EnterStartupMode(now monotime.Time) {
 }
 
 func (b *bbrSender) OnExitStartup(now monotime.Time) {
-	// Could add statistics tracking here
+	b.connStats.SlowStartExits.Add(1)
+}
+
+func (b *bbrSender) updateStats() {
+	b.connStats.CongestionWindow.Store(uint64(b.GetCongestionWindow()))
+	b.connStats.SlowStart.Store(b.InSlowStart())
 }
 
 func (b *bbrSender) CalculatePacingRate() {
