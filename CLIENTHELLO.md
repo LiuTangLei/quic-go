@@ -16,23 +16,30 @@ TLS extensions are shuffled per fresh dial; one correctly encoded, bounded RFC
 WebTransport support, third-party domain, ECH or ALPS capability is advertised.
 The ClientHello uses Chromium-style TLS 1.3 cipher order and key-share groups,
 implemented Brotli certificate compression and standard TLS status extensions.
+Its Chromium-style signature list supports ECDSA and RSA server certificates;
+Ed25519 server certificates require the standard TLS path.
 
 ## Authentication
 
 The standard TLS config's roots, name verification, static certificates,
 VerifyPeerCertificate and VerifyConnection remain enforced. Certificate/key
 material and mutable templates are never shared or derived from another peer.
-Unsupported ECH, custom curve restrictions, dynamic client certificates,
-resumption caches and early data fail explicitly rather than being silently
-ignored. This first client adapter does fresh TLS 1.3 handshakes (connection
-reuse still works); it does not promise session resumption/0-RTT fingerprinting.
+Unsupported ECH, custom curve restrictions, dynamic client certificates and
+resumption caches fail explicitly rather than being silently ignored. This
+first client adapter does fresh TLS 1.3 handshakes (connection reuse still
+works); opportunistic `DialEarly`, including the default HTTP/3 transport,
+waits for the full handshake and never sends 0-RTT. It does not promise session
+resumption/0-RTT fingerprinting.
 
 Call `Conn.ExportKeyingMaterial(label, context, length)` for channel-bound
 application authentication. It obtains the exporter from the actual handshake
 implementation. Do not call `ConnectionState().TLS.ExportKeyingMaterial` on a
 profiled connection: Go's public TLS state cannot carry uTLS's private exporter.
 There is no unsafe memory conversion. Public TLS state and verification
-callbacks retain their normal standard-library certificate types.
+callbacks retain their normal standard-library certificate types. The uTLS
+version does not publicly expose the negotiated curve or HelloRetryRequest
+status, so the Go 1.26 `CurveID` and `HelloRetryRequest` fields remain zero on
+the profiled path and must not be used to infer the negotiated key exchange.
 
 `ConnectionState().ClientHelloProfile` reports the actual local client path;
 it is empty on standard handshakes and incoming server connections. The
@@ -43,7 +50,8 @@ server. Missing or revoked authorization is never inferred from a fingerprint.
 
 Tests exercise actual serialized TLS ClientHello data, empty QUIC session IDs,
 real transport-parameter roundtrips, per-dial extension order, pinned/public-root
-verification rejection, exporter equality and context separation, full QUIC
+verification rejection with preserved error causes, exporter equality and
+context separation, default HTTP/3 dialing and connection reuse, full QUIC
 handshakes, bidirectional DATAGRAMs, and eight concurrent standard/profiled
 connections sharing one UDP socket and nonzero CIDs. Full upstream short-mode
 and focused race suites are retained. This is protocol/implementation evidence,

@@ -98,14 +98,14 @@ func NewCryptoSetupClient(
 		EnableSessionEvents: true,
 	})}
 	if len(clientHelloProfile) > 0 && clientHelloProfile[0] != "" {
-		if enable0RTT {
-			cs.initErr = errors.New("browser QUIC ClientHello does not support 0-RTT")
-		} else {
-			var customized quicTLSConn
-			customized, cs.initErr = newBrowserQUICConn(tlsConf, clientHelloProfile[0])
-			if cs.initErr == nil {
-				cs.conn = customized
-			}
+		// DialEarly is opportunistic and is also the default HTTP/3 dial path.
+		// With resumption disabled it must wait for a fresh handshake, just as
+		// standard TLS does when no usable session ticket is available.
+		cs.allow0RTT = false
+		var customized quicTLSConn
+		customized, cs.initErr = newBrowserQUICConn(tlsConf, clientHelloProfile[0])
+		if cs.initErr == nil {
+			cs.conn = customized
 		}
 	}
 	cs.conn.SetTransportParameters(cs.ourParams.Marshal(protocol.PerspectiveClient))

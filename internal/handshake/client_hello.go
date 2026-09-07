@@ -181,7 +181,9 @@ func translateTLSError(err error) error {
 	}
 	var alert utls.AlertError
 	if errors.As(err, &alert) {
-		return fmt.Errorf("uTLS QUIC: %w", tls.AlertError(alert))
+		// Preserve certificate-verification and callback errors for callers of
+		// errors.Is / errors.As while exposing the alert type used by QUIC.
+		return fmt.Errorf("uTLS QUIC: %w%.0w", err, tls.AlertError(alert))
 	}
 	return err
 }

@@ -32,8 +32,12 @@ var (
 	// Does not inflate the pacing rate.
 	DefaultMinimumCongestionWindow = 4 * protocol.ByteCount(protocol.InitialPacketSize)
 
-	// The gain used for the STARTUP, equal to 2/ln(2).
-	DefaultHighGain = 2.885
+	// BBRv3's startup pacing gain still doubles delivery each round, while
+	// using a separate 2x BDP congestion window to limit queue growth.
+	DefaultHighGain = 2.77
+
+	// Leave a little pacing headroom for queues to drain between probes.
+	BBRPacingMargin = 0.99
 
 	// The gain used in STARTUP after loss has been detected.
 	// 1.5 is enough to allow for 25% exogenous loss and still observe a 25% growth
@@ -62,7 +66,7 @@ var (
 	RoundTripsWithoutGrowthBeforeExitingStartup = int64(3)
 
 	// Coefficient of target congestion window to use when basing PROBE_RTT on BDP.
-	ModerateProbeRttMultiplier = 0.75
+	ModerateProbeRttMultiplier = 0.5
 
 	// Coefficient to determine if a new RTT is sufficiently similar to min_rtt that
 	// we don't need to enter PROBE_RTT.
@@ -169,10 +173,17 @@ type bbrSender struct {
 	cycleCurrentOffset int
 	// The time at which the last pacing gain cycle was started.
 	lastCycleStart monotime.Time
+	// Retain congestion feedback until the current probe can finish, including
+	// loss arriving before the probe has lasted one min RTT.
+	cycleHasLosses bool
 	// Indicates whether the connection has reached the full bandwidth mode.
 	isAtFullBandwidth bool
 	// Number of rounds during which there was no significant bandwidth increase.
 	roundsWithoutBandwidthGain int64
+	// QUIC delivers one callback per acknowledged packet. A round's first ACK
+	// can be app-limited even when later ACKs provide an unrestricted sample.
+	// Keep one plateau-check opportunity until such a sample arrives.
+	fullBandwidthCheckPending bool
 	// The bandwidth compared to which the increase is measured.
 	bandwidthAtLastRound Bandwidth
 	// Set to true upon exiting quiescence.
@@ -183,6 +194,9 @@ type bbrSender struct {
 	exitProbeRttAt monotime.Time
 	// Indicates whether a round-trip has passed since PROBE_RTT became active.
 	probeRttRoundPassed bool
+	// Measured only after flight reaches the ProbeRTT target. Keep the old
+	// unloaded RTT for that target until a fresh probe has completed.
+	probeRttMinDelay time.Duration
 	// Indicates whether the most recent bandwidth sample was marked as
 	// app-limited.
 	lastSampleIsAppLimited bool
@@ -218,7 +232,7 @@ type bbrSender struct {
 	// If true, will not exit low gain mode until bytes_in_flight drops below BDP
 	// or it's time for high gain mode.
 	drainToTarget bool
-	// If true, use a CWND of 0.75*BDP during probe_rtt instead of 4 packets.
+	// If true, use a CWND of 0.5*BDP during probe_rtt instead of 4 packets.
 	probeRttBasedOnBdp bool
 	// If true, skip probe_rtt and update the timestamp of the existing min_rtt to
 	// now if min_rtt over the last cycle is within 12.5% of the current min_rtt.
@@ -255,16 +269,17 @@ func NewBBRSender(clock Clock, rttStats *utils.RTTStats, initialMaxDatagramSize 
 		maxCongestionWindow:       maxCongestionWindow,
 		minCongestionWindow:       4 * initialMaxDatagramSize,
 		highGain:                  DefaultHighGain,
-		highCwndGain:              DefaultHighGain,
-		drainGain:                 1.0 / DefaultHighGain,
+		highCwndGain:              DefaultCongestionWindowGainConst,
+		drainGain:                 0.5,
 		pacingGain:                DefaultHighGain,
-		congestionWindowGain:      DefaultHighGain,
+		congestionWindowGain:      DefaultCongestionWindowGainConst,
 		congestionWindowGainConst: DefaultCongestionWindowGainConst,
 		numStartupRtts:            RoundTripsWithoutGrowthBeforeExitingStartup,
 		recoveryState:             NOT_IN_RECOVERY,
 		recoveryWindow:            maxCongestionWindow,
 		minRttSinceLastProbeRtt:   InfiniteRTT,
 		maxDatagramSize:           initialMaxDatagramSize,
+		probeRttBasedOnBdp:        true,
 	}
 
 	b.connStats = new(utils.ConnectionStats)
@@ -309,10 +324,17 @@ func (b *bbrSender) OnPacketSent(sentTime monotime.Time, bytesInFlight protocol.
 	if isRetransmittable {
 		priorFlight = max(0, priorFlight-bytes)
 	}
-	if priorFlight == 0 && b.sampler.totalBytesSent > 0 {
+	if isRetransmittable && priorFlight == 0 && b.sampler.totalBytesSent > 0 {
 		b.sampler.OnAppLimited()
+		b.aggregationEpochStartTime = sentTime
+		b.aggregationEpochBytes = 0
+		if b.mode == PROBE_BW && b.BandwidthEstimate() > 0 {
+			b.pacingRate = Bandwidth(BBRPacingMargin * float64(b.BandwidthEstimate()))
+			b.lastCycleStart = sentTime
+			b.cycleHasLosses = false
+		}
 	}
-	if priorFlight == 0 && b.sampler.isAppLimited {
+	if isRetransmittable && priorFlight == 0 && b.sampler.isAppLimited {
 		b.exitingQuiescence = true
 	}
 
@@ -326,7 +348,12 @@ func (b *bbrSender) OnPacketSent(sentTime monotime.Time, bytesInFlight protocol.
 	}
 
 	b.sampler.OnPacketSent(sentTime, packetNumber, bytes, priorFlight, isRetransmittable)
-	b.pacer.SentPacket(sentTime, bytes)
+	if isRetransmittable {
+		// Pure ACKs are allowed even while pacing-limited. Charging them to
+		// this budget can indefinitely postpone MAX_DATA / MAX_STREAM_DATA
+		// on a receiver whose own delivery-rate estimate is very low.
+		b.pacer.SentPacket(sentTime, bytes)
+	}
 }
 
 func (b *bbrSender) CanSend(bytesInFlight protocol.ByteCount) bool {
@@ -348,6 +375,14 @@ func (b *bbrSender) GetCongestionWindow() protocol.ByteCount {
 
 func (b *bbrSender) OnApplicationLimited(flight protocol.ByteCount) {
 	if flight >= b.GetCongestionWindow() {
+		return
+	}
+	if b.mode == STARTUP && b.BandwidthEstimate() > 0 && flight >= b.GetTargetCongestionWindow(1.5) {
+		// A streaming writer can briefly empty its queue between chunks while
+		// at least 1.5 BDP is already in flight. The pipe remains full enough
+		// to measure further bandwidth, so this is not an app-limited sample.
+		// Below that threshold (or without a model), retain normal protection
+		// for genuinely sparse traffic such as reverse tunnel ACKs.
 		return
 	}
 	b.sampler.OnAppLimited()
@@ -372,13 +407,6 @@ func (b *bbrSender) OnPacketAcked(number protocol.PacketNumber, ackedBytes proto
 	if !bandwidthSample.stateAtSend.isValid {
 		// Packet was never sent or already processed
 		return
-	}
-
-	// Debug logging for startup performance issues
-	if b.mode == STARTUP && b.roundTripCount < 20 {
-		_ = bandwidthSample // Placeholder for potential debug logging
-		// In production, you could log: RTT=%d, BW=%d Mbps, CWND=%d, Round=%d, Mode=%d
-		// eventTime, bandwidthSample.bandwidth/125000, b.congestionWindow, b.roundTripCount, b.mode
 	}
 
 	b.lastSampleIsAppLimited = bandwidthSample.stateAtSend.isAppLimited
@@ -411,8 +439,12 @@ func (b *bbrSender) OnPacketAcked(number protocol.PacketNumber, ackedBytes proto
 		b.UpdateGainCyclePhase(eventTime, priorInFlight, false)
 	}
 
-	if isRoundStart && !b.isAtFullBandwidth {
+	if isRoundStart {
+		b.fullBandwidthCheckPending = b.mode == STARTUP
+	}
+	if b.mode == STARTUP && !b.isAtFullBandwidth && b.fullBandwidthCheckPending && !b.lastSampleIsAppLimited {
 		b.CheckIfFullBandwidthReached()
+		b.fullBandwidthCheckPending = false
 	}
 
 	b.MaybeExitStartupOrDrain(eventTime)
@@ -426,8 +458,12 @@ func (b *bbrSender) OnPacketAcked(number protocol.PacketNumber, ackedBytes proto
 
 func (b *bbrSender) OnCongestionEvent(number protocol.PacketNumber, lostBytes protocol.ByteCount, priorInFlight protocol.ByteCount) {
 	defer b.updateStats()
-	b.connStats.PacketsLost.Add(1)
-	b.connStats.BytesLost.Add(uint64(lostBytes))
+	// QUIC reports validated ECN congestion with zero lost bytes. It still
+	// warrants a congestion response, but is not a lost packet.
+	if lostBytes > 0 {
+		b.connStats.PacketsLost.Add(1)
+		b.connStats.BytesLost.Add(uint64(lostBytes))
+	}
 	b.bytesInFlight = max(0, priorInFlight-lostBytes)
 	if b.liveFlightStats {
 		b.bytesInFlight = protocol.ByteCount(b.connStats.BytesInFlight.Load())
@@ -446,6 +482,12 @@ func (b *bbrSender) OnCongestionEvent(number protocol.PacketNumber, lostBytes pr
 
 	// Recalculate recovery window
 	b.CalculateRecoveryWindow(0, lostBytes)
+	if b.mode == PROBE_BW && b.pacingGain > 1 {
+		// Only advance a high-gain probe here. Multiple loss callbacks for one
+		// ACK must not also skip its drain phase.
+		b.UpdateGainCyclePhase(b.clock.Now(), priorInFlight, true)
+		b.CalculatePacingRate()
+	}
 }
 
 // OnPacketDiscarded releases sampling state when QUIC drops a packet number
@@ -515,14 +557,25 @@ func (b *bbrSender) UpdateRoundTripCounter(lastAckedPacket protocol.PacketNumber
 
 func (b *bbrSender) updateMinRtt(now monotime.Time, sampleRtt time.Duration) bool {
 	b.minRttSinceLastProbeRtt = minRtt(b.minRttSinceLastProbeRtt, sampleRtt)
+	if b.mode == PROBE_RTT {
+		if !b.exitProbeRttAt.IsZero() {
+			b.probeRttMinDelay = minRtt(b.probeRttMinDelay, sampleRtt)
+		}
+		if b.minRtt == 0 || sampleRtt < b.minRtt {
+			b.minRtt = sampleRtt
+		}
+		return false
+	}
 
 	// Do not expire min_rtt if none was ever available.
 	minRttExpired := b.minRtt > 0 && (now.Sub(b.minRttTimestamp) > MinRttExpiry)
 
-	if minRttExpired || sampleRtt < b.minRtt || b.minRtt == 0 {
-		if minRttExpired && b.ShouldExtendMinRttExpiry() {
-			minRttExpired = false
-		} else {
+	if minRttExpired && sampleRtt > b.minRtt && !b.exitingQuiescence && !b.ShouldExtendMinRttExpiry() {
+		// A queued sample cannot increase the BDP used to drain that queue.
+		return true
+	}
+	if minRttExpired || sampleRtt <= b.minRtt || b.minRtt == 0 {
+		if !minRttExpired || !b.ShouldExtendMinRttExpiry() {
 			b.minRtt = sampleRtt
 		}
 		b.minRttTimestamp = now
@@ -531,7 +584,7 @@ func (b *bbrSender) updateMinRtt(now monotime.Time, sampleRtt time.Duration) boo
 		b.appLimitedSinceLastProbeRtt = false
 	}
 
-	return minRttExpired
+	return false
 }
 
 func (b *bbrSender) ShouldExtendMinRttExpiry() bool {
@@ -583,27 +636,29 @@ func (b *bbrSender) UpdateAckAggregationBytes(ackTime monotime.Time, ackedBytes 
 	// Compute how many bytes are expected to be delivered, assuming max bandwidth is correct.
 	// maxBandwidth.GetBest() is in bits/second; divide by BytesPerSecond (8) to get bytes/second.
 	timeDelta := ackTime.Sub(b.aggregationEpochStartTime)
-	expectedAckedBytes := protocol.ByteCount(b.maxBandwidth.GetBest()/int64(BytesPerSecond)) * protocol.ByteCount(timeDelta) / protocol.ByteCount(time.Second)
+	expectedAckedBytes := b.bytesForBandwidth(b.BandwidthEstimate(), max(0, timeDelta), b.maxCongestionWindow)
 
 	// Reset the current aggregation epoch as soon as the ack arrival rate is less
 	// than or equal to the max bandwidth.
-	if b.aggregationEpochBytes <= expectedAckedBytes {
+	if b.aggregationEpochStartTime.IsZero() || timeDelta < 0 || b.aggregationEpochBytes <= expectedAckedBytes {
 		b.aggregationEpochBytes = ackedBytes
 		b.aggregationEpochStartTime = ackTime
 		return 0
 	}
 
 	// Compute how many extra bytes were delivered vs max bandwidth.
-	b.aggregationEpochBytes += ackedBytes
-	b.maxAckHeight.Update(int64(b.aggregationEpochBytes-expectedAckedBytes), b.roundTripCount)
-	return b.aggregationEpochBytes - expectedAckedBytes
+	b.aggregationEpochBytes = min(b.aggregationEpochBytes+ackedBytes, b.maxCongestionWindow)
+	excess := min(b.aggregationEpochBytes-expectedAckedBytes, b.congestionWindow)
+	b.maxAckHeight.Update(int64(excess), b.roundTripCount)
+	return excess
 }
 
 func (b *bbrSender) UpdateGainCyclePhase(now monotime.Time, priorInFlight protocol.ByteCount, hasLosses bool) {
+	b.cycleHasLosses = b.cycleHasLosses || hasLosses
 	bytesInFlight := b.bytesInFlight
 	shouldAdvanceGainCycling := now.Sub(b.lastCycleStart) > b.GetMinRtt()
 
-	if b.pacingGain > 1.0 && !hasLosses && priorInFlight < b.GetTargetCongestionWindow(b.pacingGain) {
+	if b.pacingGain > 1.0 && !b.cycleHasLosses && priorInFlight < b.GetTargetCongestionWindow(b.pacingGain) {
 		shouldAdvanceGainCycling = false
 	}
 
@@ -619,20 +674,27 @@ func (b *bbrSender) UpdateGainCyclePhase(now monotime.Time, priorInFlight protoc
 			return
 		}
 		b.pacingGain = PacingGain[b.cycleCurrentOffset]
+		b.cycleHasLosses = false
 	}
 }
 
 func (b *bbrSender) GetTargetCongestionWindow(gain float64) protocol.ByteCount {
 	// BandwidthEstimate() is in bits/second; divide by BytesPerSecond (8) to get bytes/second.
 	// BDP (bytes) = RTT (nanoseconds) × bandwidth (bytes/s) / nanoseconds_per_second
-	bdp := protocol.ByteCount(b.GetMinRtt()) * protocol.ByteCount(b.BandwidthEstimate()/BytesPerSecond) / protocol.ByteCount(time.Second)
-	congestionWindow := protocol.ByteCount(gain * float64(bdp))
-
-	if congestionWindow == 0 {
-		congestionWindow = protocol.ByteCount(gain * float64(b.initialCongestionWindow))
+	bdp := float64(b.BandwidthEstimate()) / float64(BytesPerSecond) * b.GetMinRtt().Seconds()
+	if b.BandwidthEstimate() == 0 {
+		bdp = float64(b.initialCongestionWindow)
 	}
+	// Apply the gain before capping; half of a large BDP can still exceed
+	// the maximum supported window.
+	return max(protocol.ByteCount(min(gain*bdp, float64(b.maxCongestionWindow))), b.minCongestionWindow)
+}
 
-	return max(congestionWindow, b.minCongestionWindow)
+// Convert before multiplying: bytes/s times nanoseconds can overflow int64
+// even on a 1 Gbps connection after a modest idle period. These model values
+// are bounded by the configured flight limit; sub-byte rounding is harmless.
+func (b *bbrSender) bytesForBandwidth(bw Bandwidth, interval time.Duration, limit protocol.ByteCount) protocol.ByteCount {
+	return protocol.ByteCount(min(float64(bw)/float64(BytesPerSecond)*interval.Seconds(), float64(limit)))
 }
 
 func (b *bbrSender) CheckIfFullBandwidthReached() {
@@ -678,6 +740,7 @@ func (b *bbrSender) EnterProbeBandwidthMode(now monotime.Time) {
 
 	b.lastCycleStart = now
 	b.pacingGain = PacingGain[b.cycleCurrentOffset]
+	b.cycleHasLosses = false
 }
 
 func (b *bbrSender) MaybeEnterOrExitProbeRtt(now monotime.Time, isRoundStart, minRttExpired bool) {
@@ -686,23 +749,29 @@ func (b *bbrSender) MaybeEnterOrExitProbeRtt(now monotime.Time, isRoundStart, mi
 			b.OnExitStartup(now)
 		}
 		b.mode = PROBE_RTT
+		b.fullBandwidthCheckPending = false
 		b.pacingGain = 1.0
 		b.exitProbeRttAt = monotime.Time(0)
+		b.probeRttMinDelay = InfiniteRTT
 	}
 
 	if b.mode == PROBE_RTT {
 		b.sampler.OnAppLimited()
 		if b.exitProbeRttAt.IsZero() {
-			if b.bytesInFlight < b.ProbeRttCongestionWindow()+MaxOutgoingPacketSize {
+			if b.bytesInFlight <= b.ProbeRttCongestionWindow() {
 				b.exitProbeRttAt = now.Add(ProbeRttTime)
 				b.probeRttRoundPassed = false
+				b.currentRoundTripEnd = b.lastSendPacket
 			}
 		} else {
 			if isRoundStart {
 				b.probeRttRoundPassed = true
 			}
-			if now.After(b.exitProbeRttAt) && b.probeRttRoundPassed {
+			if now.After(b.exitProbeRttAt) && b.probeRttRoundPassed && b.probeRttMinDelay != InfiniteRTT {
+				b.minRtt = b.probeRttMinDelay
 				b.minRttTimestamp = now
+				b.minRttSinceLastProbeRtt = InfiniteRTT
+				b.appLimitedSinceLastProbeRtt = false
 				if !b.isAtFullBandwidth {
 					b.EnterStartupMode(now)
 				} else {
@@ -723,6 +792,7 @@ func (b *bbrSender) ProbeRttCongestionWindow() protocol.ByteCount {
 
 func (b *bbrSender) EnterStartupMode(now monotime.Time) {
 	b.mode = STARTUP
+	b.fullBandwidthCheckPending = false
 	b.pacingGain = b.highGain
 	b.congestionWindowGain = b.highCwndGain
 }
@@ -748,7 +818,7 @@ func (b *bbrSender) CalculatePacingRate() {
 		}
 		b.pacingRate = BandwidthFromDelta(b.initialCongestionWindow, rtt)
 		// Apply startup gain to initial pacing rate
-		b.pacingRate = Bandwidth(b.pacingGain * float64(b.pacingRate))
+		b.pacingRate = Bandwidth(BBRPacingMargin * b.pacingGain * float64(b.pacingRate))
 		return
 	}
 
@@ -756,8 +826,8 @@ func (b *bbrSender) CalculatePacingRate() {
 		return
 	}
 
-	targetRate := Bandwidth(b.pacingGain * float64(bwEstimate))
-	if b.isAtFullBandwidth {
+	targetRate := Bandwidth(BBRPacingMargin * b.pacingGain * float64(bwEstimate))
+	if b.isAtFullBandwidth || b.mode == PROBE_RTT {
 		b.pacingRate = targetRate
 		return
 	}
@@ -789,10 +859,9 @@ func (b *bbrSender) CalculateCongestionWindow(ackedBytes, excessAcked protocol.B
 		targetWindow += excessAcked
 	}
 
-	addBytesAcked := true || !b.InRecovery()
 	if b.isAtFullBandwidth {
 		b.congestionWindow = min(targetWindow, b.congestionWindow+ackedBytes)
-	} else if addBytesAcked && (b.congestionWindow < targetWindow || b.sampler.totalBytesAcked < b.initialCongestionWindow) {
+	} else if b.congestionWindow < targetWindow || b.sampler.totalBytesAcked < b.initialCongestionWindow {
 		b.congestionWindow += ackedBytes
 	}
 
