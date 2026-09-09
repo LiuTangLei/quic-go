@@ -65,6 +65,17 @@ func TestConfigValidation(t *testing.T) {
 		require.NoError(t, validateConfig(conf))
 		require.Equal(t, uint16(protocol.MaxPacketBufferSize), conf.InitialPacketSize)
 	})
+
+	t.Run("only one congestion controller", func(t *testing.T) {
+		cases := []Config{
+			{EnableCubic: true, EnableBBR: true},
+			{EnableCubic: true, EnableBBRv3: true},
+			{EnableBBR: true, EnableBBRv3: true},
+		}
+		for _, c := range cases {
+			require.Error(t, validateConfig(&c))
+		}
+	})
 }
 
 func TestConfigHandshakeIdleTimeout(t *testing.T) {
@@ -118,7 +129,13 @@ func configWithNonZeroNonFunctionFields(t *testing.T) *Config {
 			f.Set(reflect.ValueOf(&StatelessResetKey{1, 2, 3, 4}))
 		case "KeepAlivePeriod":
 			f.Set(reflect.ValueOf(time.Second))
-		case "EnableDatagrams", "EnableCubic", "EnableBBR":
+		case "EnableDatagrams":
+			f.Set(reflect.ValueOf(true))
+		case "EnableCubic":
+			f.Set(reflect.ValueOf(false))
+		case "EnableBBR":
+			f.Set(reflect.ValueOf(false))
+		case "EnableBBRv3":
 			f.Set(reflect.ValueOf(true))
 		case "DisableVersionNegotiationPackets":
 			f.Set(reflect.ValueOf(true))

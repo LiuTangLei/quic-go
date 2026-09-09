@@ -26,8 +26,18 @@ func validateConfig(config *Config) error {
 	if config == nil {
 		return nil
 	}
-	if config.EnableBBR && config.EnableCubic {
-		return fmt.Errorf("select one congestion controller, not both BBR and CUBIC")
+	selected := 0
+	if config.EnableCubic {
+		selected++
+	}
+	if config.EnableBBR {
+		selected++
+	}
+	if config.EnableBBRv3 {
+		selected++
+	}
+	if selected > 1 {
+		return fmt.Errorf("select one congestion controller: only one of EnableCubic, EnableBBR, and EnableBBRv3 may be true")
 	}
 	if config.ClientHelloProfile != "" && config.ClientHelloProfile != "chromium-h3" {
 		return fmt.Errorf("unsupported ClientHello profile %q", config.ClientHelloProfile)
@@ -114,6 +124,7 @@ func populateConfig(config *Config) *Config {
 	return &Config{
 		ClientHelloProfile:               config.ClientHelloProfile,
 		EnableBBR:                        config.EnableBBR,
+		EnableBBRv3:                      config.EnableBBRv3,
 		GetConfigForClient:               config.GetConfigForClient,
 		EnableCubic:                      config.EnableCubic,
 		Versions:                         versions,
