@@ -108,7 +108,8 @@ type sentPacketHandler struct {
 
 	perspective        protocol.Perspective
 	useCubic           bool
-	useBBR             bool
+	useBBR             bool // BBRv1 or BBRv3: both need connection-wide packet numbers
+	useBBRv3           bool
 	congestionSequence protocol.PacketNumber
 
 	qlogger     qlogwriter.Recorder
@@ -135,6 +136,7 @@ func NewSentPacketHandler(
 ) SentPacketHandler {
 	useCubic := len(cubicOption) != 0 && cubicOption[0]
 	useBBR := len(cubicOption) > 1 && cubicOption[1]
+	useBBRv3 := len(cubicOption) > 2 && cubicOption[2]
 	var controller congestion.SendAlgorithmWithDebugInfos
 	controller = congestion.NewCubicSender(
 		congestion.DefaultClock{},
@@ -145,7 +147,9 @@ func NewSentPacketHandler(
 		qlogger,
 	)
 
-	if useBBR {
+	if useBBRv3 {
+		controller = congestion.NewBBRv3Sender(congestion.DefaultClock{}, rttStats, initialMaxDatagramSize, connStats)
+	} else if useBBR {
 		controller = congestion.NewBBRSender(congestion.DefaultClock{}, rttStats, initialMaxDatagramSize, connStats)
 	}
 	h := &sentPacketHandler{
@@ -158,14 +162,17 @@ func NewSentPacketHandler(
 		rttStats:                       rttStats,
 		connStats:                      connStats,
 		congestion:                     controller,
-		useBBR:                         useBBR,
+		useBBR:                         useBBR || useBBRv3,
+		useBBRv3:                       useBBRv3,
 		useCubic:                       useCubic,
 		ignorePacketsBelow:             ignorePacketsBelow,
 		perspective:                    pers,
 		qlogger:                        qlogger,
 		logger:                         logger,
 	}
-	if enableECN {
+	// Draft-06 BBRv3 does not define a CE response. Do not validate ECN
+	// while silently ignoring congestion marks.
+	if enableECN && !useBBRv3 {
 		h.enableECN = true
 		h.ecnTracker = newECNTracker(logger, qlogger)
 	}
@@ -1182,7 +1189,9 @@ func (h *sentPacketHandler) MigratedPath(now monotime.Time, initialMaxDatagramSi
 		!h.useCubic,
 		h.qlogger,
 	)
-	if h.useBBR {
+	if h.useBBRv3 {
+		h.congestion = congestion.NewBBRv3Sender(congestion.DefaultClock{}, h.rttStats, initialMaxDatagramSize, h.connStats)
+	} else if h.useBBR {
 		h.congestion = congestion.NewBBRSender(congestion.DefaultClock{}, h.rttStats, initialMaxDatagramSize, h.connStats)
 	}
 	h.setLossDetectionTimer(now)

@@ -110,9 +110,12 @@ type Config struct {
 	// Reno default. It is a local congestion policy, not a wire extension.
 	// Defaults to false; used by high-BDP datagram tunnels in this fork.
 	EnableCubic bool
-	// EnableBBR selects the fork's BBRv1-derived datagram controller. It is mutually
-	// exclusive with EnableCubic and is disabled by default.
+	// EnableBBR selects the fork's BBRv1-derived datagram controller.
+	// It is mutually exclusive with EnableCubic and EnableBBRv3 and is disabled by default.
 	EnableBBR bool
+	// EnableBBRv3 selects the opt-in BBRv3 datagram controller.
+	// It is mutually exclusive with EnableCubic and EnableBBR and is disabled by default.
+	EnableBBRv3 bool
 
 	// GetConfigForClient is called for incoming connections.
 	// If the error is not nil, the connection attempt is refused.

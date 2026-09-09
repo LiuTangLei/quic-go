@@ -1,11 +1,18 @@
 # Datagram BBR controller
 
-`Config.EnableBBRCongestionControl()` selects this fork's opt-in BBRv1-derived
-controller. It uses per-packet delivery sampling, pacing, congestion-window and
-loss-recovery limits. The normal default controller and the on-wire protocol
-are unchanged.
+This fork keeps the legacy BBRv1-derived controller behind
+`Config.EnableBBRCongestionControl()`, and adds a separate opt-in
+`Config.EnableBBRv3CongestionControl()` for the explicit BBRv3 state machine.
+Both controllers are local congestion policies. They use per-packet delivery
+sampling, pacing, congestion-window and loss-recovery limits. The normal
+default controller and the on-wire protocol are unchanged.
 
 ## BBRv3-inspired tuning
+
+The explicit BBRv3 controller follows the draft's startup, drain, ProbeBW
+phases, RTT probing and app-limited / idle restart behaviors as implemented in
+this worktree. The legacy BBRv1-derived sender remains available for
+compatibility and is not relabeled or merged into the v3 path.
 
 The following changes borrow the bounded startup, idle-restart and RTT-probing
 ideas in the [BBRv3 draft, revision 06](https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html):

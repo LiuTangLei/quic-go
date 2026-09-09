@@ -322,6 +322,7 @@ var newConnection = func(
 		s.logger,
 		s.config.EnableCubic,
 		s.config.EnableBBR,
+		s.config.EnableBBRv3,
 	)
 	s.maxPayloadSizeEstimate.Store(uint32(estimateMaxPayloadSize(protocol.ByteCount(s.config.InitialPacketSize))))
 	statelessResetToken := statelessResetter.GetStatelessResetToken(srcConnID)
@@ -453,6 +454,7 @@ var newClientConnection = func(
 		s.logger,
 		s.config.EnableCubic,
 		s.config.EnableBBR,
+		s.config.EnableBBRv3,
 	)
 	s.maxPayloadSizeEstimate.Store(uint32(estimateMaxPayloadSize(protocol.ByteCount(s.config.InitialPacketSize))))
 	oneRTTStream := newCryptoStream()
@@ -845,11 +847,8 @@ type ConnectionStats struct {
 
 func (c *Conn) ConnectionStats() ConnectionStats {
 	controller := "reno"
-	if c.config.EnableCubic {
-		controller = "cubic"
-	}
-	if c.config.EnableBBR {
-		controller = "bbr-v1"
+	if c.config != nil {
+		controller = c.config.CongestionControlName()
 	}
 	return ConnectionStats{
 		CongestionControl: controller,

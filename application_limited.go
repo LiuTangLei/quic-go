@@ -7,7 +7,7 @@ import "github.com/quic-go/quic-go/internal/protocol"
 // direction can carry only small inner ACKs for seconds while the other is busy.
 // Do not infer this from RTT or timer spacing: inspect the actual pending work.
 func (c *Conn) maybeNotifyApplicationLimited() {
-	if c.config == nil || !c.config.EnableBBR || !c.handshakeConfirmed {
+	if c.config == nil || (!c.config.EnableBBR && !c.config.EnableBBRv3) || !c.handshakeConfirmed {
 		return
 	}
 	if c.framer != nil && c.framer.HasData() {
