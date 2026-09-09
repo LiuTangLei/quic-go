@@ -2584,7 +2584,8 @@ func (c *Conn) sendPackets(now monotime.Time) error {
 		return nil
 	}
 
-	if c.conn.capabilities().GSO {
+	capabilities := c.conn.capabilities()
+	if capabilities.GSO || capabilities.PacketBatch {
 		return c.sendPacketsWithGSO(now)
 	}
 	return c.sendPacketsWithoutGSO(now)
@@ -2629,6 +2630,13 @@ func (c *Conn) sendPacketsWithoutGSO(now monotime.Time) error {
 func (c *Conn) sendPacketsWithGSO(now monotime.Time) error {
 	buf := getLargePacketBuffer()
 	maxSize := c.maxPacketSize()
+	// A portable adapter can send a small vector of individual datagrams.
+	// Keep the normal GSO buffer limit for real kernel offload; software
+	// batches remain bounded to avoid monopolizing the receive loop.
+	batchLimit := buf.Cap()
+	if !c.conn.capabilities().GSO {
+		batchLimit = min(batchLimit, protocol.ByteCount(portablePacketBatchSize)*maxSize)
+	}
 
 	ecn := c.sentPacketHandler.ECNMode(true)
 	for {
@@ -2663,7 +2671,7 @@ func (c *Conn) sendPacketsWithGSO(now monotime.Time) error {
 		// 2. The last packet appended was a full-size packet
 		// 3. The next packet will have the same ECN marking
 		// 4. We still have enough space for another full-size packet in the buffer
-		if !dontSendMore && size == maxSize && nextECN == ecn && buf.Len()+maxSize <= buf.Cap() {
+		if !dontSendMore && size == maxSize && nextECN == ecn && buf.Len()+maxSize <= batchLimit {
 			continue
 		}
 

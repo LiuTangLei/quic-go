@@ -71,6 +71,12 @@ func newSendConn(c rawConn, remote net.Addr, info packetInfo, logger utils.Logge
 
 func (c *sconn) Write(p []byte, gsoSize uint16, ecn protocol.ECN) error {
 	ai := c.remoteAddrInfo.Load()
+	if gsoSize != 0 && c.rawConn.capabilities().PacketBatch && !c.rawConn.capabilities().GSO {
+		// Segment in userspace into a vector, not a UDP super-packet. This
+		// preserves existing QUIC pacing, one-packet authentication tags and
+		// path MTU without advertising kernel GSO/ECN/DF capabilities.
+		return c.writePortablePacketBatch(p, ai.addr, gsoSize, ecn)
+	}
 	err := c.writePacket(p, ai.addr, ai.oob, gsoSize, ecn)
 	if err != nil && isGSOError(err) {
 		// disable GSO for future calls
