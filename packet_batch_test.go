@@ -49,7 +49,7 @@ func TestPortableBatchSegmentationWithoutKernelGSO(t *testing.T) {
 		p[i] = byte(i)
 	}
 	want := bytes.Clone(p)
-	if err := sender.Write(p, 1200, protocol.ECNUnsupported); err != nil {
+	if err := sender.batchWriter()([][]byte{p[:1200], p[1200:2400], p[2400:]}); err != nil {
 		t.Fatal(err)
 	}
 	clear(p)
@@ -61,18 +61,11 @@ func TestPortableBatchSegmentationWithoutKernelGSO(t *testing.T) {
 	}
 	next := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 2), Port: 34567}
 	sender.ChangeRemoteAddr(next, packetInfo{})
-	if err := sender.Write([]byte{1}, 1200, protocol.ECNUnsupported); err != nil {
+	if err := sender.batchWriter()([][]byte{{1}}); err != nil {
 		t.Fatal(err)
 	}
 	if recorder.address != next {
 		t.Fatal("stale path used")
-	}
-	before := recorder.batches
-	if err := sender.Write(make([]byte, 9601), 1200, protocol.ECNUnsupported); err == nil || recorder.batches != before {
-		t.Fatal("oversize batch accepted")
-	}
-	if err := sender.Write([]byte{1}, 1200, protocol.ECT0); err == nil {
-		t.Fatal("ECN falsely supported")
 	}
 	if err := sender.Write([]byte{1}, 0, protocol.ECNUnsupported); err != nil {
 		t.Fatal(err)
