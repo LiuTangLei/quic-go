@@ -27,6 +27,7 @@ type sendQueue struct {
 	runStopped  chan struct{} // runStopped when the run loop returns
 	available   chan struct{}
 	conn        sendConn
+	batchWrite  func([][]byte) error
 }
 
 var _ sender = &sendQueue{}
@@ -34,7 +35,12 @@ var _ sender = &sendQueue{}
 const sendQueueCapacity = 8
 
 func newSendQueue(conn sendConn) sender {
+	var batchWrite func([][]byte) error
+	if c, ok := conn.(interface{ batchWriter() func([][]byte) error }); ok {
+		batchWrite = c.batchWriter()
+	}
 	return &sendQueue{
+		batchWrite:  batchWrite,
 		conn:        conn,
 		runStopped:  make(chan struct{}),
 		closeCalled: make(chan struct{}),
@@ -87,6 +93,32 @@ func (h *sendQueue) Run() error {
 			// make sure that all queued packets are actually sent out
 			shouldClose = true
 		case e := <-h.queue:
+			if h.batchWrite != nil {
+				var ready [sendQueueCapacity]queueEntry
+				ready[0] = e
+				n := 1
+			drainReady:
+				for n < len(ready) {
+					select {
+					case next := <-h.queue:
+						ready[n] = next
+						n++
+					default:
+						break drainReady
+					}
+				}
+				// Never wait to form a batch. QUIC already applied pacing and
+				// congestion accounting before these packets entered the queue.
+				err := h.writeReadyBatch(ready[:n])
+				if err != nil && !isSendMsgSizeErr(err) {
+					return err
+				}
+				select {
+				case h.available <- struct{}{}:
+				default:
+				}
+				continue
+			}
 			if err := h.conn.Write(e.buf.Data, e.gsoSize, e.ecn); err != nil {
 				// This additional check enables:
 				// 1. Checking for "datagram too large" message from the kernel, as such,

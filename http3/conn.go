@@ -259,21 +259,19 @@ func (c *rawConn) handleControlStream(str *quic.ReceiveStream) {
 }
 
 func (c *rawConn) sendDatagram(streamID quic.StreamID, b []byte) error {
-	// TODO: this creates a lot of garbage and an additional copy
-	data := make([]byte, 0, len(b)+8)
+	var scratch [8]byte
 	quarterStreamID := uint64(streamID / 4)
-	data = quicvarint.Append(data, uint64(streamID/4))
-	data = append(data, b...)
+	prefix := quicvarint.Append(scratch[:0], quarterStreamID)
 	if c.qlogger != nil {
 		c.qlogger.RecordEvent(qlog.DatagramCreated{
 			QuarterStreamID: quarterStreamID,
 			Raw: qlog.RawInfo{
-				Length:        len(data),
+				Length:        len(prefix) + len(b),
 				PayloadLength: len(b),
 			},
 		})
 	}
-	return c.conn.SendDatagram(data)
+	return c.conn.SendDatagramWithPrefix(prefix, b)
 }
 
 func (c *rawConn) receiveDatagrams() error {

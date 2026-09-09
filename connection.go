@@ -3073,6 +3073,15 @@ func (c *Conn) recordStreamPriorityUpdated(id protocol.StreamID, urgency int8, i
 // In addition, a datagram may be dropped before being sent out if the available packet size suddenly decreases.
 // If the payload is too large to be sent at the current time, a [DatagramTooLargeError] is returned.
 func (c *Conn) SendDatagram(p []byte) error {
+	return c.SendDatagramWithPrefix(nil, p)
+}
+
+// SendDatagramWithPrefix sends prefix followed by payload as one RFC 9221
+// datagram. Both slices are borrowed only until this call returns. The owned
+// queue buffer is allocated once, avoiding an intermediate full-sized HTTP
+// Datagram buffer. Limits apply to the combined payload; transport framing,
+// congestion control, backpressure and unreliable delivery are unchanged.
+func (c *Conn) SendDatagramWithPrefix(prefix, p []byte) error {
 	if !c.supportsDatagrams() {
 		return errors.New("datagram support disabled")
 	}
@@ -3084,11 +3093,13 @@ func (c *Conn) SendDatagram(p []byte) error {
 		f.MaxDataLen(c.peerParams.MaxDatagramFrameSize, c.version),
 		protocol.ByteCount(c.maxPayloadSizeEstimate.Load()),
 	)
-	if protocol.ByteCount(len(p)) > maxDataLen {
+	// Subtraction avoids overflowing an int when accounting for both slices.
+	if protocol.ByteCount(len(prefix)) > maxDataLen || protocol.ByteCount(len(p)) > maxDataLen-protocol.ByteCount(len(prefix)) {
 		return &DatagramTooLargeError{MaxDatagramPayloadSize: int64(maxDataLen)}
 	}
-	f.Data = make([]byte, len(p))
-	copy(f.Data, p)
+	f.Data = make([]byte, len(prefix)+len(p))
+	copy(f.Data, prefix)
+	copy(f.Data[len(prefix):], p)
 	return c.datagramQueue.Add(f)
 }
 
