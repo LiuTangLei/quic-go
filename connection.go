@@ -217,7 +217,8 @@ type Conn struct {
 	keepAlivePingSent bool
 	keepAliveInterval time.Duration
 
-	datagramQueue *datagramQueue
+	datagramQueue    *datagramQueue
+	datagramReceiver atomic.Pointer[datagramReceiveHandler]
 
 	connStateMutex sync.Mutex
 	connState      ConnectionState
@@ -2176,6 +2177,9 @@ func (c *Conn) handleDatagramFrame(f *wire.DatagramFrame) error {
 			ErrorCode:    qerr.ProtocolViolation,
 			ErrorMessage: "DATAGRAM frame too large",
 		}
+	}
+	if handler := c.datagramReceiver.Load(); handler != nil && handler.receive(f.Data) {
+		return nil
 	}
 	c.datagramQueue.HandleDatagramFrame(f)
 	return nil
