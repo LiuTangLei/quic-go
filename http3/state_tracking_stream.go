@@ -24,11 +24,12 @@ const TunnelDatagramQueueCapacity = streamDatagramQueueLen
 type stateTrackingStream struct {
 	*quic.Stream
 
-	sendDatagram func([]byte) error
-	hasData      chan struct{}
-	queue        [][]byte
-	queueHead    int
-	queueSize    int
+	sendDatagram      func([]byte) error
+	sendDatagramBatch func([]byte, [][]byte) (int, error)
+	hasData           chan struct{}
+	queue             [][]byte
+	queueHead         int
+	queueSize         int
 
 	mx      sync.Mutex
 	sendErr error

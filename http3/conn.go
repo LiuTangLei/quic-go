@@ -115,6 +115,9 @@ func (c *rawConn) openControlStream(settings *settingsFrame) (*quic.SendStream, 
 
 func (c *rawConn) TrackStream(str *quic.Stream) *stateTrackingStream {
 	hstr := newStateTrackingStream(str, c, func(b []byte) error { return c.sendDatagram(str.StreamID(), b) })
+	hstr.sendDatagramBatch = func(prefix []byte, packets [][]byte) (int, error) {
+		return c.sendDatagramBatch(str.StreamID(), prefix, packets)
+	}
 
 	c.streamMx.Lock()
 	c.streams[str.StreamID()] = hstr
