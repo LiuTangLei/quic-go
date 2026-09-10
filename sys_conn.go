@@ -16,8 +16,6 @@ import (
 )
 
 type connCapabilities struct {
-	// PacketBatch is portable datagram batching, separate from kernel GSO.
-	PacketBatch bool
 	// This connection has the Don't Fragment (DF) bit set.
 	// This means it makes to run DPLPMTUD.
 	DF bool
@@ -143,7 +141,4 @@ func (c *basicConn) WritePacket(b []byte, addr net.Addr, _ []byte, gsoSize uint1
 	return c.WriteTo(b, addr)
 }
 
-func (c *basicConn) capabilities() connCapabilities {
-	_, batch := c.PacketConn.(PacketBatchWriter)
-	return connCapabilities{DF: c.supportsDF, PacketBatch: batch}
-}
+func (c *basicConn) capabilities() connCapabilities { return connCapabilities{DF: c.supportsDF} }

@@ -2,8 +2,6 @@ package quic
 
 import "net"
 
-const portablePacketBatchSize = 8
-
 // PacketBatchWriter is an optional capability of a non-OOB net.PacketConn.
 // Each slice is one already-protected UDP datagram, not a GSO super-packet.
 // All slices are borrowed only until return and target the same address.

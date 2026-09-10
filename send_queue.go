@@ -16,11 +16,9 @@ type sender interface {
 }
 
 type queueEntry struct {
-	buf       *packetBuffer
-	gsoSize   uint16
-	ecn       protocol.ECN
-	vector    [portablePacketBatchSize]*packetBuffer
-	vectorLen uint8
+	buf     *packetBuffer
+	gsoSize uint16
+	ecn     protocol.ECN
 }
 
 type sendQueue struct {

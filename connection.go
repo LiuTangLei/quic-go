@@ -2583,14 +2583,8 @@ func (c *Conn) sendPackets(now monotime.Time) error {
 		return nil
 	}
 
-	capabilities := c.conn.capabilities()
-	if capabilities.GSO {
+	if c.conn.capabilities().GSO {
 		return c.sendPacketsWithGSO(now)
-	}
-	if capabilities.PacketBatch {
-		if queue, ok := c.sendQueue.(*sendQueue); ok && queue.batchWrite != nil {
-			return c.sendPacketsWithPortableBatch(now, queue)
-		}
 	}
 	return c.sendPacketsWithoutGSO(now)
 }
