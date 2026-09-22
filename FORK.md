@@ -1,9 +1,48 @@
-# Tailscale native-IP datagram fork (experimental)
+# Shared QUIC / HTTP3 transport fork
 
-Base: upstream quic-go v0.62.0, commit 793f74d8e03368c5aded128af6f48d21dbb47f73.
+Base: upstream quic-go v0.63.0, commit 9d085cc690f7c96451e8ae5659eb0e64671da47a.
+This is a protocol library, not a combined Tailscale/Tailcat application.
 The canonical Go module path is retained so applications can use a versioned
 `replace github.com/quic-go/quic-go => github.com/LiuTangLei/quic-go <tag>`.
 Do not point a release at an unpublished tag or a local filesystem replacement.
+
+## Upstream 0.63 integration (2026-09-22)
+
+The upgrade merges the official v0.63.0 tag into v0.62.0-tailscale.4, retaining
+its bounded DATAGRAM send batches, authenticated receive dispatch, browser
+ClientHello profile, congestion controllers and public TLS exporter. The
+compatibility FIN-acknowledgment API remains available to existing stream
+consumers; it does not introduce application commands or a second product.
+
+Do not substitute v0.62.0-tailscale.5 as an equivalent performance baseline:
+that split branch was based on an earlier tree and lacks the .4 DATAGRAM batch
+and direct-receive additions. No old tag is rewritten by this upgrade.
+
+HTTP/3 0.63 server request URLs no longer carry Scheme/Host for ordinary and
+Extended CONNECT requests; authority remains in Request.Host. Extended
+CONNECT RequestURI is now the :path value. Stream/application errors are
+wrapped as *http3.Error and support unwrapping. Consumers must not depend on
+the previous URL representation or require a direct QUIC error type assertion.
+
+Both consuming projects were tested with this source: the Tailscale H3/IP
+engine (including node authentication, MSS, batch and tsnet tests) and
+LiuTangLei/tailcat-quic. This is compatibility evidence, not a new WAN speed or
+browser-indistinguishability claim. No installed service is changed by a
+library source update.
+
+## Repository boundaries
+
+- LiuTangLei/tailscale is the VPN application and its integration code.
+- LiuTangLei/tailcat-quic is the separate Tailcat application.
+- LiuTangLei/quic-go is this reusable protocol implementation.
+- LiuTangLei/wireguard-go supplies native WG/AWG and shared TUN primitives;
+  using its TUN code does not mean H3 payloads are encrypted with WireGuard.
+
+Splitting applications does not require duplicating an entire protocol
+library. Historical tailcat-tailscale / tailcat-quic-go mirror repositories
+are not the primary application locations and are not deleted or rewritten
+here. Existing consumers keep exact version pins; do not redirect dependencies
+through a similarly named mirror without a separately reviewed migration.
 
 ## Changes
 
