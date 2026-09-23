@@ -1066,6 +1066,9 @@ func TestSentPacketHandlerCongestion(t *testing.T) {
 		utils.DefaultLogger,
 	)
 	sph.(*sentPacketHandler).congestion = cong
+	// This generic mock expects wire packet numbers, not BBR's cross-space
+	// sequence. Production BBRv3 numbering is covered separately.
+	sph.(*sentPacketHandler).useBBR = false
 
 	var packets packetTracker
 	// Send the first 5 packets: not congestion-limited, not pacing-limited.
@@ -1265,6 +1268,8 @@ func TestSentPacketHandlerECN(t *testing.T) {
 	)
 	sph.(*sentPacketHandler).ecnTracker = ecnHandler
 	sph.(*sentPacketHandler).congestion = cong
+	// Exercise ECN accounting with an injected CE-aware mock, not BBRv3.
+	sph.(*sentPacketHandler).useBBR = false
 
 	// ECN marks on non-1-RTT packets are ignored
 	sph.SentPacket(monotime.Now(), sph.PopPacketNumber(protocol.EncryptionInitial), protocol.InvalidPacketNumber, nil, nil, protocol.EncryptionInitial, protocol.ECT1, 1200, false, false)

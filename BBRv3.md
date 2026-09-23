@@ -4,16 +4,15 @@ This fork provides an independent userspace QUIC implementation of the BBRv3 alg
 
 This is a QUIC adaptation, not Google's Linux TCP module and not a claim of certification, formal equivalence, or production-scale fairness evaluation. The Internet-Draft is a work in progress; the implementation targets revision 06 rather than silently tracking future draft changes.
 
-## Selecting the controller
+## Default: lightly tuned BBRv3
 
-```go
-config := &quic.Config{EnableDatagrams: true}
-config.EnableBBRv3CongestionControl()
-```
+On the `perf/bbrv3-default-20260923` development branch, a nil or zero Config uses lightly tuned BBRv3 automatically. No algorithm selection is needed. Controller choice remains local to the sender, not a wire negotiation. `Config.CongestionControlName()` and `ConnectionStats().CongestionControl` report `bbr-v3`, including after path migration.
 
-Use this on **both endpoints** when both directions should use BBRv3. Controller choice is local to the sender, not negotiated by QUIC. `Config.CongestionControlName()` and a running connection's `ConnectionStats().CongestionControl` report `bbr-v3`.
+The only parameter changes from this fork's previous v3 policy are bandwidth reprobe waiting of **1–2 seconds** instead of 2–3 seconds, and **10%** rather than 15% long-term headroom. Startup/UP/DOWN gains, the 2% loss threshold, 0.7 reduction factor, cwnd limits and ProbeRTT duration/scheduling are retained. This favors capacity rediscovery/utilization over reproducing the draft's original coexistence tradeoff; it is not an unpaced or loss-ignoring sender.
 
-The setter clears the older BBR and CUBIC choices. Configurations that directly set contradictory controller flags are rejected. Configuration copying, connection creation, and path-migration controller replacement preserve the v3 selection. The existing `EnableBBRCongestionControl()` API retains its earlier BBRv1-derived behavior; see [BBR.md](BBR.md). Upstream/default connections are not silently switched to this experimental controller.
+For source compatibility, existing EnableBBR/EnableCubic fields and helper methods remain deprecated aliases. Helpers preserve their historical request bits for callers that inspect them, but populated configs and every production handler select v3. Contradictory old flags no longer select different algorithms. Historical controller code/tests are retained as references, not reachable selectable policies. Existing peers need no wire-protocol change, but a caller requiring exact old congestion behavior must stay on its previous version.
+
+The immutable `v0.63.0-quic.2` release has not been rewritten. See [the current implementation and test record](BBRV3_TUNING_20260923.md) before adopting this candidate.
 
 ## Specification mapping
 
@@ -22,7 +21,7 @@ The setter clears the older BBR and CUBIC choices. Configurations that directly 
 | STARTUP and DRAIN | Pacing gains 2.77 and 0.5, packet-timed full-bandwidth plateau detection, app-limited filtering, round-bounded drain, startup high-loss exit based on a full loss round and multiple loss ranges. |
 | ProbeBW | Separate DOWN, CRUISE, REFILL, and UP states, with ACK-phase tracking so delayed feedback is attributed to the sending phase. Randomized time/round probe spacing and precautionary reprobes are modeled explicitly. |
 | Maximum delivery rate | Two completed probe-cycle bandwidth windows; low app-limited samples do not erase an already established path model. Sent-packet delivery state is used rather than ACK arrival spacing alone. |
-| Congestion bounds | Short-term bandwidth and in-flight bounds, long-term in-flight bounds, 2% loss threshold, 0.7 reduction factor, and 15% long-term headroom outside upward probing. |
+| Congestion bounds | Short-term bandwidth and in-flight bounds, long-term in-flight bounds, 2% loss threshold, 0.7 reduction factor, and tuned 10% long-term headroom outside upward probing. |
 | Upward probing | ACK-clocked, cwnd-limited long-term-bound growth with an exponential round-by-round slope; exit on excess loss or a bandwidth plateau. |
 | Minimum RTT and ProbeRTT | A ten-second minimum-RTT window and five-second probe scheduling interval; ProbeRTT uses half the estimated BDP, at least four datagrams, for at least 200 ms and one packet-timed round. Saved cwnd is restored afterward. |
 | ACK aggregation | A bounded excess-ACK model adds headroom to the BDP target without treating compressed ACK bursts as new measured bandwidth. |

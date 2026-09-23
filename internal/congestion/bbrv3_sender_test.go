@@ -61,8 +61,8 @@ func TestBBRv3ProbeCycleAndGains(t *testing.T) {
 	b.startProbeDown(clock.Now())
 	require.Equal(t, bbrv3ProbeBWDown, b.mode)
 	require.Equal(t, .90, b.pacingGain)
-	require.GreaterOrEqual(t, b.probeWait, 2*time.Second)
-	require.Less(t, b.probeWait, 3*time.Second)
+	require.GreaterOrEqual(t, b.probeWait, bbrv3ProbeWaitBase)
+	require.Less(t, b.probeWait, bbrv3ProbeWaitBase+bbrv3ProbeWaitJitter)
 	b.probeWait = 2 * time.Second
 	b.roundsSinceProbeUp = 0
 	b.bytesInFlight = 400_000
@@ -175,7 +175,7 @@ func TestBBRv3LongTermHeadroomAndSlope(t *testing.T) {
 	seedBBRv3Path(b)
 	b.inflightLongterm = 800_000
 	b.updateControl(0)
-	require.EqualValues(t, 680_000, b.congestionWindow)
+	require.EqualValues(t, 720_000, b.congestionWindow)
 	b.setMode(bbrv3ProbeBWUp)
 	b.congestionWindow = 800_000
 	b.probeUpAckedPerIncrement = 1200

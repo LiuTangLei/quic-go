@@ -107,8 +107,7 @@ type sentPacketHandler struct {
 	ecnTracker ecnHandler
 
 	perspective        protocol.Perspective
-	useCubic           bool
-	useBBR             bool // BBRv1 or BBRv3: both need connection-wide packet numbers
+	useBBR             bool // connection-wide congestion packet numbers
 	useBBRv3           bool
 	congestionSequence protocol.PacketNumber
 
@@ -132,26 +131,9 @@ func NewSentPacketHandler(
 	pers protocol.Perspective,
 	qlogger qlogwriter.Recorder,
 	logger utils.Logger,
-	cubicOption ...bool,
+	_ ...bool, // legacy selector arguments; every connection uses BBRv3
 ) SentPacketHandler {
-	useCubic := len(cubicOption) != 0 && cubicOption[0]
-	useBBR := len(cubicOption) > 1 && cubicOption[1]
-	useBBRv3 := len(cubicOption) > 2 && cubicOption[2]
-	var controller congestion.SendAlgorithmWithDebugInfos
-	controller = congestion.NewCubicSender(
-		congestion.DefaultClock{},
-		rttStats,
-		connStats,
-		initialMaxDatagramSize,
-		!useCubic, // retain Reno by default; opt-in CUBIC for datagram tunnels
-		qlogger,
-	)
-
-	if useBBRv3 {
-		controller = congestion.NewBBRv3Sender(congestion.DefaultClock{}, rttStats, initialMaxDatagramSize, connStats)
-	} else if useBBR {
-		controller = congestion.NewBBRSender(congestion.DefaultClock{}, rttStats, initialMaxDatagramSize, connStats)
-	}
+	controller := congestion.NewBBRv3Sender(congestion.DefaultClock{}, rttStats, initialMaxDatagramSize, connStats)
 	h := &sentPacketHandler{
 		peerCompletedAddressValidation: pers == protocol.PerspectiveServer,
 		peerAddressValidated:           pers == protocol.PerspectiveClient || clientAddressValidated,
@@ -162,9 +144,8 @@ func NewSentPacketHandler(
 		rttStats:                       rttStats,
 		connStats:                      connStats,
 		congestion:                     controller,
-		useBBR:                         useBBR || useBBRv3,
-		useBBRv3:                       useBBRv3,
-		useCubic:                       useCubic,
+		useBBR:                         true,
+		useBBRv3:                       true,
 		ignorePacketsBelow:             ignorePacketsBelow,
 		perspective:                    pers,
 		qlogger:                        qlogger,
@@ -172,10 +153,6 @@ func NewSentPacketHandler(
 	}
 	// Draft-06 BBRv3 does not define a CE response. Do not validate ECN
 	// while silently ignoring congestion marks.
-	if enableECN && !useBBRv3 {
-		h.enableECN = true
-		h.ecnTracker = newECNTracker(logger, qlogger)
-	}
 	return h
 }
 
@@ -1181,18 +1158,6 @@ func (h *sentPacketHandler) MigratedPath(now monotime.Time, initialMaxDatagramSi
 	for pn := range h.appDataPackets.history.PathProbes() {
 		h.appDataPackets.history.RemovePathProbe(pn)
 	}
-	h.congestion = congestion.NewCubicSender(
-		congestion.DefaultClock{},
-		h.rttStats,
-		h.connStats,
-		initialMaxDatagramSize,
-		!h.useCubic,
-		h.qlogger,
-	)
-	if h.useBBRv3 {
-		h.congestion = congestion.NewBBRv3Sender(congestion.DefaultClock{}, h.rttStats, initialMaxDatagramSize, h.connStats)
-	} else if h.useBBR {
-		h.congestion = congestion.NewBBRSender(congestion.DefaultClock{}, h.rttStats, initialMaxDatagramSize, h.connStats)
-	}
+	h.congestion = congestion.NewBBRv3Sender(congestion.DefaultClock{}, h.rttStats, initialMaxDatagramSize, h.connStats)
 	h.setLossDetectionTimer(now)
 }

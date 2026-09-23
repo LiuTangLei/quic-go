@@ -45,12 +45,17 @@ const (
 	bbrv3DownGain         = 0.90
 	bbrv3UpGain           = 1.25
 	bbrv3Beta             = 0.7
-	bbrv3Headroom         = 0.15
+	bbrv3Headroom         = 0.10 // light tuning: retain 10% margin, not zero
 	bbrv3LossThreshold    = 0.02
 	bbrv3MinRTTWindow     = 10 * time.Second
 	bbrv3ProbeRTTInterval = 5 * time.Second
 	bbrv3ProbeRTTDuration = 200 * time.Millisecond
 	bbrv3Infinity         = protocol.MaxByteCount
+
+	// Reprobe sooner than the draft's 2–3 seconds without increasing UP
+	// gain or weakening loss response. Random jitter still avoids lockstep.
+	bbrv3ProbeWaitBase   = time.Second
+	bbrv3ProbeWaitJitter = time.Second
 )
 
 type bbrv3SentPacket struct {
@@ -264,8 +269,8 @@ func (b *bbrv3Sender) OnPacketAcked(number protocol.PacketNumber, ackedBytes, pr
 		return
 	} // never inflate delivered bytes for duplicates/discards
 	delete(b.sent, number)
-	prior := b.sampler.connectionStats.Get(number)
-	if prior == nil {
+	prior, found := b.sampler.connectionStats.Get(number)
+	if !found {
 		return
 	}
 	state := prior.sendTimeState
@@ -351,8 +356,8 @@ func (b *bbrv3Sender) OnCongestionEvent(number protocol.PacketNumber, lostBytes,
 	if !ok {
 		return
 	}
-	prior := b.sampler.connectionStats.Get(number)
-	if prior == nil {
+	prior, found := b.sampler.connectionStats.Get(number)
+	if !found {
 		delete(b.sent, number)
 		return
 	}
@@ -521,7 +526,7 @@ func (b *bbrv3Sender) startProbeDown(now monotime.Time) {
 	b.resetCongestionSignals()
 	b.probeUpAckedPerIncrement = bbrv3Infinity
 	b.roundsSinceProbeUp = int64(rand.IntN(2))
-	b.probeWait = 2*time.Second + time.Duration(rand.Int64N(int64(time.Second)))
+	b.probeWait = bbrv3ProbeWaitBase + time.Duration(rand.Int64N(int64(bbrv3ProbeWaitJitter)))
 	b.cycleStamp = now
 	b.ackPhase = bbrv3AcksProbeStopping
 	b.startRound()

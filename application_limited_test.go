@@ -38,7 +38,12 @@ func TestBBRApplicationLimitedOnlyWhenQueuesEmpty(t *testing.T) {
 	c.handshakeConfirmed = true
 	c.config.EnableBBR = false
 	c.maybeNotifyApplicationLimited()
-	if h.calls != 1 {
-		t.Fatal("default Reno path changed")
+	if h.calls != 2 {
+		t.Fatal("default BBRv3 did not receive application-limited notification")
+	}
+	c.config = nil
+	c.maybeNotifyApplicationLimited()
+	if h.calls != 3 {
+		t.Fatal("nil default config incorrectly gated BBRv3 notification")
 	}
 }

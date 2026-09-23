@@ -106,15 +106,14 @@ type Config struct {
 	// It does not claim an exact browser version fingerprint. Resumption and
 	// ECH are intentionally not supported in this initial adapter.
 	ClientHelloProfile string
-	// EnableCubic selects CUBIC for this connection instead of the upstream
-	// Reno default. It is a local congestion policy, not a wire extension.
-	// Defaults to false; used by high-BDP datagram tunnels in this fork.
+	// EnableCubic is retained for source compatibility only.
+	// Deprecated: all connections use lightly tuned BBRv3, regardless of this flag.
 	EnableCubic bool
-	// EnableBBR selects the fork's BBRv1-derived datagram controller.
-	// It is mutually exclusive with EnableCubic and EnableBBRv3 and is disabled by default.
+	// EnableBBR is retained for source compatibility only.
+	// Deprecated: all connections use lightly tuned BBRv3, regardless of this flag.
 	EnableBBR bool
-	// EnableBBRv3 selects the opt-in BBRv3 datagram controller.
-	// It is mutually exclusive with EnableCubic and EnableBBR and is disabled by default.
+	// EnableBBRv3 is retained for existing explicit configurations. BBRv3 is
+	// also used when this is false or Config is nil; it is not an opt-out.
 	EnableBBRv3 bool
 
 	// GetConfigForClient is called for incoming connections.

@@ -6,6 +6,15 @@ The canonical Go module path is retained so applications can use a versioned
 `replace github.com/quic-go/quic-go => github.com/LiuTangLei/quic-go <tag>`.
 Do not point a release at an unpublished tag or a local filesystem replacement.
 
+## Current development policy (2026-09-23)
+
+The `perf/bbrv3-default-20260923` branch uses **lightly tuned BBRv3** for every
+connection, including zero Config and migration. Legacy public selectors remain
+only as documented compatibility aliases; they do not enable another algorithm.
+The previous `.2` release and its immutable tags are unchanged. See BBRv3.md and
+BBRV3_TUNING_20260923.md for the small parameter changes, reduced-allocation
+sampling, compatibility scope and actual measurements.
+
 ## Upstream 0.63 integration (2026-09-22)
 
 The upgrade merges the official v0.63.0 tag into v0.62.0-tailscale.4, retaining
@@ -55,9 +64,10 @@ through a similarly named mirror without a separately reviewed migration.
   remains bounded and datagrams remain unreliable.
 * HyStart ignores application-limited RTT samples instead of exhausting slow
   start while a tunnel direction only carries small inner TCP ACKs.
-* CUBIC and BBRv1 are opt-in per-connection policies. Zero Config retains the
-  upstream Reno default. EnableBBRCongestionControl / EnableCubicCongestionControl
-  must be called before Dial/Listen. Selecting both flags is rejected.
+* Lightly tuned BBRv3 is the sole production congestion policy on the current
+  development branch. Legacy API names remain source-compatible aliases.
+  Historical Reno/CUBIC/BBRv1 implementation tests are reference coverage, not
+  advertised or selectable application policies.
 * Controller, cwnd, in-flight and slow-start diagnostics are independent atomic
   samples. They carry no payload or key material.
 * BBR is instantiated with the actual connection RTT statistics and initial

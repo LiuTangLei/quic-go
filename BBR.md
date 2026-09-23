@@ -1,11 +1,13 @@
-# Datagram BBR controller
+# Historical BBR implementation notes
 
-This fork keeps the legacy BBRv1-derived controller behind
-`Config.EnableBBRCongestionControl()`, and adds a separate opt-in
-`Config.EnableBBRv3CongestionControl()` for the explicit BBRv3 state machine.
-Both controllers are local congestion policies. They use per-packet delivery
-sampling, pacing, congestion-window and loss-recovery limits. The normal
-default controller and the on-wire protocol are unchanged.
+This document records the earlier implementation and its provenance. It is not
+a configuration guide for the current development branch. All production
+connections now use **lightly tuned BBRv3**; legacy selection methods are
+compatibility aliases, not alternative algorithms. See [BBRv3.md](BBRv3.md) and
+[the current change record](BBRV3_TUNING_20260923.md). Published older tags keep
+their original behavior.
+
+The historical text below is retained for attribution and regression context.
 
 ## BBRv3-inspired tuning
 

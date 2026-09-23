@@ -66,14 +66,18 @@ func TestConfigValidation(t *testing.T) {
 		require.Equal(t, uint16(protocol.MaxPacketBufferSize), conf.InitialPacketSize)
 	})
 
-	t.Run("only one congestion controller", func(t *testing.T) {
+	t.Run("legacy flags normalize to BBRv3", func(t *testing.T) {
 		cases := []Config{
 			{EnableCubic: true, EnableBBR: true},
 			{EnableCubic: true, EnableBBRv3: true},
 			{EnableBBR: true, EnableBBRv3: true},
 		}
 		for _, c := range cases {
-			require.Error(t, validateConfig(&c))
+			require.NoError(t, validateConfig(&c))
+			got := populateConfig(&c)
+			require.True(t, got.EnableBBRv3)
+			require.False(t, got.EnableBBR)
+			require.False(t, got.EnableCubic)
 		}
 	})
 }

@@ -102,8 +102,10 @@ func TestBBRSerializedNetworkLossAndIdleRestart(t *testing.T) {
 				server, err := listener.Accept(ctx)
 				require.NoError(t, err)
 				defer server.CloseWithError(0, "")
-				require.True(t, client.config.EnableBBR)
-				require.True(t, server.config.EnableBBR)
+				require.True(t, client.config.EnableBBRv3)
+				require.True(t, server.config.EnableBBRv3)
+				require.Equal(t, "bbr-v3", client.ConnectionStats().CongestionControl)
+				require.Equal(t, "bbr-v3", server.ConnectionStats().CongestionControl)
 				require.Equal(t, profile, client.ConnectionState().ClientHelloProfile)
 
 				pattern := make([]byte, 256)
