@@ -207,6 +207,8 @@ WAN matrix or multi-hour stress result is claimed for this candidate. The later
 loopback-only old/new interoperability check is recorded above.
 
 Artifacts and test-only module files are on the Mac under
-`tailscale-all/audits/bbrv3-default-20260923`. Only this development source branch
-is changed; the published v0.63.0-quic.2 tag, production binaries, application
-pins, node state and disabled library Actions settings are not changed.
+`tailscale-all/audits/bbrv3-default-20260923`. The validated development source is
+also fast-forwarded to the shared library default branch; the published
+v0.63.0-quic.2 tag, production binaries, application pins, node state and disabled
+library Actions settings are not changed. Default-branch development code is
+not a newly published or WAN-performance-qualified application release.

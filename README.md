@@ -15,14 +15,14 @@ config := &quic.Config{
 // Dial / Listen normally; lightly tuned BBRv3 is automatic.
 ```
 
-This policy is on the `perf/bbrv3-default-20260923` development branch. It does not retroactively change the immutable `v0.63.0-quic.2` release or installed applications. Existing application source interfaces remain compatible; details are in [BBRv3.md](BBRv3.md).
+This is the default branch's development policy. It does not retroactively change the immutable `v0.63.0-quic.2` release or installed applications. Existing application source interfaces remain compatible; details are in [BBRv3.md](BBRv3.md).
 
 ## Transport features
 
 - QUIC v1, TLS 1.3 and real HTTP/3 framing on the upstream 0.63 base.
 - Reliable streams for byte-stream services and bounded QUIC DATAGRAM paths for IP/UDP traffic.
 - Ready-only packet batching and group-owned DATAGRAM storage without waiting to fill a batch.
-- Inline delivery-sampling records to reduce per-packet heap allocation.
+- Inline delivery-sampling records and single-take ACK bookkeeping to reduce per-packet allocation and duplicate lookups.
 - Event-driven final-FIN acknowledgment instead of periodic polling.
 - Optional per-connection Chromium-inspired ClientHello; see [CLIENTHELLO.md](CLIENTHELLO.md) for its limitations.
 
