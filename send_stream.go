@@ -72,6 +72,13 @@ type SendStream struct {
 	cancellationFlagged bool
 	completed           bool // set when this stream no longer needs to be scheduled
 
+	// completed also becomes true on connection shutdown. Keep actual FIN
+	// acknowledgment separate for the fork's delivery-wait API. The wake
+	// channel is allocated lazily; normal streams have no extra timer/channel.
+	finAcknowledged bool
+	ackShutdownErr  error
+	ackWait         chan struct{} // guarded by mutex, closed only on terminal change
+
 	priorityValue atomic.Uint64
 
 	writeChan chan struct{}
@@ -561,6 +568,8 @@ func (s *SendStream) isNewlyCompleted() bool {
 	// The stream is completed if we sent the FIN.
 	if s.finSent {
 		s.completed = true
+		s.finAcknowledged = s.resetErr == nil
+		s.signalAcknowledgmentLocked()
 		return true
 	}
 	// The stream is also completed if:
@@ -660,6 +669,7 @@ func (s *SendStream) CancelWrite(errorCode StreamErrorCode) {
 		return
 	}
 	s.resetErr = &StreamError{StreamID: s.streamID, ErrorCode: errorCode, Remote: false}
+	s.signalAcknowledgmentLocked()
 	s.ctxCancel(s.resetErr)
 
 	reliableOffset := s.reliableOffset()
@@ -754,6 +764,7 @@ func (s *SendStream) handleStopSendingFrame(f *wire.StopSendingFrame) {
 	s.returnFramesToPool()
 	if s.resetErr == nil {
 		s.resetErr = &StreamError{StreamID: s.streamID, ErrorCode: f.ErrorCode, Remote: true}
+		s.signalAcknowledgmentLocked()
 		s.ctxCancel(s.resetErr)
 	}
 	s.queuedResetStreamFrame = &wire.ResetStreamFrame{
@@ -847,6 +858,12 @@ func (s *SendStream) SetWriteDeadline(t time.Time) error {
 // The peer will NOT be informed about this: the stream is closed without sending a FIN or RST.
 func (s *SendStream) closeForShutdown(err error) {
 	s.mutex.Lock()
+	// Even after application Close, an abort is not proof of peer delivery.
+	// Do not change the ordinary Write/Context shutdown contract.
+	if s.ackShutdownErr == nil {
+		s.ackShutdownErr = err
+	}
+	s.signalAcknowledgmentLocked()
 	s.completed = true
 	if s.shutdownErr == nil && !s.finishedWriting {
 		s.shutdownErr = err
