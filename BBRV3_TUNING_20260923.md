@@ -131,6 +131,61 @@ seed was not logged, so the exact failing loss schedule was not reproduced and
 no root-cause fix or proof of flakiness is claimed. Keep this as an open stress
 validation item before calling the change production-ready.
 
+## Continuation: fewer ACK lookups and explicit old/new interop
+
+The continuation on the same branch removes another redundant sent-state map
+lookup from the BBRv3 ACK path. The sender now takes its original send record
+once and invokes the same sampler arithmetic on that owned value. Missing,
+duplicate and discarded packet callbacks still do not inflate delivery. New
+sender-level tests cover reversed ACK order interleaved with duplicate loss,
+late ACK and discard, plus an invalid timestamp that must still account for
+exactly one delivered packet. Both maps end empty after packet retirement.
+
+Same Apple M4, Go 1.27.1, GOMAXPROCS=1, three 300 ms samples, comparing the
+immediately preceding e9696a4e implementation against this small ACK-only change:
+
+| BBRv3 bookkeeping | Before median ns/flight | After median ns/flight | Reduction |
+| --- | ---: | ---: | ---: |
+| 32 packets | 4261 | 3773 | 11.5% |
+| 512 packets | 68439 | 60491 | 11.6% |
+
+Before raw samples: 4250 / 4274 / 4261 and 68277 / 68439 / 68792.
+After raw samples: 3773 / 3773 / 3767 and 60600 / 60491 / 60240.
+Steady-state allocations remain zero per reported operation. These percentages
+must not be added to earlier independent benchmark percentages or described as
+whole-process CPU or WAN throughput gains.
+
+A separate test-only loopback helper compiled against the immutable published
+v0.63.0-quic.2 and the candidate. It exercises seven endpoint combinations twice:
+new/new defaults, and both orientations with an old default, old BBRv1 caller
+and old BBRv3 caller. All 14 final runs passed. Each used certificate-verified
+TLS/QUIC on 127.0.0.1, four concurrent reliable streams with 2 MiB echo content
+in total, and 32 checked 512-byte DATAGRAM echoes. Every new endpoint reported
+bbr-v3. This is library wire interoperability, not an additional Tailscale node
+authentication, NAT/relay or Internet benchmark.
+
+The first harness iteration failed 5/14 runs because its server sent
+CONNECTION_CLOSE immediately after a final transport ACK. That ACK did not
+prove the peer application had consumed its buffered control message. The
+harness now requires an explicit application completion receipt, drains the
+client's final write, and lets the client initiate connection close. No library
+runtime code or content assertion was changed to make the harness pass. The
+initial failed JSON and final result remain separate in the private audit
+loopback-interop directory; the initial failure is not relabeled successful.
+
+Added TestBBRv3DefaultSeededHandshakeLoss supplements the unchanged upstream
+random loss matrix. Four seeds, both Retry settings and both first-speaker
+roles make 16 cases; three complete repetitions passed (48 case executions).
+Each direction has its own seeded one-third drop sequence, capped at ten
+consecutive drops, and failures retain seed and direction information. It uses
+virtual network time. This does not reproduce the earlier unknown random seed
+or establish a fix for that isolated historical timeout.
+
+The complete short suite, QUIC/H3/ACK/congestion/TLS race suites, go vet and both
+consumer test suites were rerun for the final runtime change. Tailscale's
+related authentication/close/batch race tests and Tailcat's complete serialized
+race suite also passed. Neither consumer go.mod was modified.
+
 ## Build identities and WAN evidence limits
 
 The resumed Linux Tailcat test build has SHA-256
@@ -148,7 +203,8 @@ and are NOT used as throughput/CPU acceptance for the final tree.
 A fresh bounded Tailcat AU/US test launch using the resumed binary was blocked
 by the execution tool. It was not retried through another agent, host or runner.
 No fresh WAN throughput number, equal-load process CPU reduction, mixed-version
-network matrix or multi-hour stress result is claimed for this final candidate.
+WAN matrix or multi-hour stress result is claimed for this candidate. The later
+loopback-only old/new interoperability check is recorded above.
 
 Artifacts and test-only module files are on the Mac under
 `tailscale-all/audits/bbrv3-default-20260923`. Only this development source branch

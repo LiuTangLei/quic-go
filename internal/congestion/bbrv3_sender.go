@@ -269,14 +269,17 @@ func (b *bbrv3Sender) OnPacketAcked(number protocol.PacketNumber, ackedBytes, pr
 		return
 	} // never inflate delivered bytes for duplicates/discards
 	delete(b.sent, number)
-	prior, found := b.sampler.connectionStats.Get(number)
+	// Take the original send-state once. A separate Get followed by the
+	// sampler's public OnPacketAcked would look up and copy the same map
+	// value twice per ACK. Missing/duplicate/discarded records remain no-ops.
+	found, prior := b.sampler.connectionStats.Remove(number)
 	if !found {
 		return
 	}
 	state := prior.sendTimeState
 	packetBytes := prior.size
 	before := b.sampler.totalBytesAcked
-	sample := b.sampler.OnPacketAcked(now, number)
+	sample := b.sampler.onPacketAckedInner(now, number, &prior)
 	ackedBytes = b.sampler.totalBytesAcked - before
 	if ackedBytes <= 0 {
 		return
