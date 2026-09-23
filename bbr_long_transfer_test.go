@@ -298,7 +298,7 @@ func runBBRLongTransfer(t *testing.T, cfg bbrLongConfig) {
 
 	serverTLS, clientTLS := browserTestTLS(t)
 	config := &Config{
-		EnableBBR: true, MaxIdleTimeout: time.Minute, HandshakeIdleTimeout: 5 * time.Second,
+		MaxIdleTimeout: time.Minute, HandshakeIdleTimeout: 5 * time.Second,
 		InitialStreamReceiveWindow: cfg.streamWindowBytes, MaxStreamReceiveWindow: cfg.streamWindowBytes,
 		InitialConnectionReceiveWindow: cfg.connectionWindowBytes, MaxConnectionReceiveWindow: cfg.connectionWindowBytes,
 	}
@@ -323,7 +323,9 @@ func runBBRLongTransfer(t *testing.T, cfg bbrLongConfig) {
 	if cfg.direction == "reverse" {
 		sender, receiver, direction = server, client, 1
 	}
-	require.True(t, sender.config.EnableBBR && receiver.config.EnableBBR)
+	// Verify the actual default controller instead of a deprecated selector bit.
+	require.Equal(t, "bbr-v3", sender.ConnectionStats().CongestionControl)
+	require.Equal(t, "bbr-v3", receiver.ConnectionStats().CongestionControl)
 	require.Equal(t, cfg.profile, client.ConnectionState().ClientHelloProfile)
 	started := time.Now()
 	router.started.Store(started.UnixNano())
