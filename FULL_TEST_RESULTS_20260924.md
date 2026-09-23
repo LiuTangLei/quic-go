@@ -1,5 +1,11 @@
 # Full validation of the tuned BBRv3 candidate
 
+> This is an earlier validation checkpoint. See
+> [the final supplement](FULL_TEST_SUPPLEMENT_20260924.md) for subsequently
+> completed local Linux GSO/socket tests, recorded raw-QUIC loopback results,
+> consumer test counts, cross-builds and fuzz coverage. The stress failures and
+> missing WAN acceptance below remain release blockers.
+
 ## Verdict
 
 **Not release-ready.** The ordinary full suite and final serialized full race
