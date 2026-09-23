@@ -36,12 +36,27 @@ func (c *Conn) SendDatagramsWithPrefix(prefix []byte, payloads [][]byte) (int, e
 	accepted := 0
 	for len(payloads) > 0 {
 		count := min(len(payloads), maxDatagramSendQueueLen)
+		// Own storage per bounded group, not two heap objects per datagram.
+		// The packer may retain a frame after Pop, so do not recycle here.
+		// Ordinary Go reachability keeps the whole group alive until the
+		// last frame is consumed. No packet, prefix or framing is shared
+		// with the caller, and each payload's capacity ends at its boundary.
+		frameStorage := make([]wire.DatagramFrame, count)
+		size := 0
+		for _, p := range payloads[:count] {
+			size += len(prefix) + len(p)
+		}
+		storage := make([]byte, size)
 		var frames [maxDatagramSendQueueLen]*wire.DatagramFrame
+		offset := 0
 		for i, p := range payloads[:count] {
-			data := make([]byte, len(prefix)+len(p))
+			end := offset + len(prefix) + len(p)
+			data := storage[offset:end:end]
 			copy(data, prefix)
 			copy(data[len(prefix):], p)
-			frames[i] = &wire.DatagramFrame{DataLenPresent: true, Data: data}
+			frameStorage[i] = wire.DatagramFrame{DataLenPresent: true, Data: data}
+			frames[i] = &frameStorage[i]
+			offset = end
 		}
 		n, err := c.datagramQueue.addBatch(frames[:count])
 		accepted += n
