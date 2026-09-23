@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -195,13 +196,13 @@ func TestGracefulShutdownIdleConnection(t *testing.T) {
 func TestGracefulShutdownLongLivedRequest(t *testing.T) {
 	delay := scaleDuration(25 * time.Millisecond)
 	errChan := make(chan error, 1)
-	requestChan := make(chan time.Duration, 1)
+	requestChan := make(chan time.Time, 1)
+	shutdownDeadline := make(chan time.Time, 1)
 
 	var server *http3.Server
 	mux := http.NewServeMux()
 	port := startHTTPServer(t, mux, func(s *http3.Server) { server = s })
 	mux.HandleFunc("/shutdown", func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
 		w.WriteHeader(http.StatusOK)
 		w.(http.Flusher).Flush()
 
@@ -210,28 +211,47 @@ func TestGracefulShutdownLongLivedRequest(t *testing.T) {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), delay)
 			defer cancel()
+			deadline, _ := ctx.Deadline()
+			shutdownDeadline <- deadline
 			errChan <- server.Shutdown(ctx)
 		}()
 
-		// measure how long it takes until the request errors
-		for t := range time.NewTicker(delay / 10).C {
-			if _, err := w.Write([]byte(t.String())); err != nil {
-				requestChan <- time.Since(start)
+		// Keep the handler active until the deadline actually ends shutdown.
+		// Stop this ticker when the handler exits, including failure cleanup.
+		ticker := time.NewTicker(delay / 10)
+		defer ticker.Stop()
+		for tick := range ticker.C {
+			if _, err := w.Write([]byte(tick.String())); err != nil {
+				requestChan <- time.Now()
 				return
 			}
 		}
 	})
 
-	start := time.Now()
-	resp, err := newHTTP3Client(t).Get(fmt.Sprintf("https://localhost:%d/shutdown", port))
+	// Handshake and instrumented scheduler latency are not part of the
+	// graceful-shutdown budget. Bound the whole operation separately and
+	// assert causality against the actual shutdown deadline, not Get's start.
+	ctx, cancel := context.WithTimeout(t.Context(), scaleDuration(time.Second))
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("https://localhost:%d/shutdown", port), nil)
 	require.NoError(t, err)
+	resp, err := newHTTP3Client(t).Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	_, err = io.Copy(io.Discard, resp.Body)
 	var h3Err *http3.Error
 	require.ErrorAs(t, err, &h3Err)
 	require.Equal(t, http3.ErrCodeNoError, h3Err.ErrorCode)
-	took := time.Since(start)
-	require.InDelta(t, delay.Seconds(), took.Seconds(), (delay / 2).Seconds())
+	clientEnded := time.Now()
+	var deadline time.Time
+	select {
+	case deadline = <-shutdownDeadline:
+	case <-ctx.Done():
+		t.Fatal("shutdown was not started")
+	}
+	require.False(t, clientEnded.Before(deadline), "request ended before the shutdown deadline")
+	require.Less(t, clientEnded.Sub(deadline), scaleDuration(time.Second), "shutdown did not unblock the client promptly")
 
 	// make sure that shutdown returned due to context deadline
 	select {
@@ -242,8 +262,9 @@ func TestGracefulShutdownLongLivedRequest(t *testing.T) {
 	}
 
 	select {
-	case requestDuration := <-requestChan:
-		require.InDelta(t, delay.Seconds(), requestDuration.Seconds(), (delay / 2).Seconds())
+	case requestEnded := <-requestChan:
+		require.False(t, requestEnded.Before(deadline), "handler ended before the shutdown deadline")
+		require.Less(t, requestEnded.Sub(deadline), scaleDuration(time.Second), "shutdown did not unblock the handler")
 	case <-time.After(time.Second):
 		t.Fatal("did not receive request duration")
 	}
@@ -384,7 +405,11 @@ func testHTTP3ListenerClosing(t *testing.T, graceful, useApplicationListener boo
 		w.WriteHeader(http.StatusOK)
 	})
 	handlerChan := make(chan struct{})
+	handlerEntered := make(chan struct{})
+	var releaseHandler sync.Once
+	t.Cleanup(func() { releaseHandler.Do(func() { close(handlerChan) }) })
 	mux.HandleFunc("/long", func(w http.ResponseWriter, r *http.Request) {
+		close(handlerEntered)
 		<-handlerChan
 		w.WriteHeader(http.StatusOK)
 	})
@@ -438,7 +463,13 @@ func testHTTP3ListenerClosing(t *testing.T, graceful, useApplicationListener boo
 			defer cancel()
 			longReqChan <- dial(t, ctx, u)
 		}()
-		time.Sleep(scaleDuration(10 * time.Millisecond))
+		// Starting shutdown before /long enters its handler changes the case
+		// into rejecting a new request, rather than draining an active one.
+		select {
+		case <-handlerEntered:
+		case <-time.After(time.Second):
+			t.Fatal("long request did not enter its handler")
+		}
 
 		go func() { shutdownChan <- server.Shutdown(context.Background()) }()
 	} else {
@@ -501,7 +532,7 @@ func testHTTP3ListenerClosing(t *testing.T, graceful, useApplicationListener boo
 		case <-time.After(scaleDuration(10 * time.Millisecond)):
 		}
 
-		close(handlerChan)
+		releaseHandler.Do(func() { close(handlerChan) })
 		select {
 		case err := <-longReqChan:
 			require.NoError(t, err)

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/quic-go/quic-go/integrationtests/tools/israce"
 	"github.com/quic-go/quic-go/internal/protocol"
 	"github.com/quic-go/quic-go/internal/qerr"
 	"github.com/quic-go/quic-go/quicvarint"
@@ -738,7 +739,15 @@ func TestFrameParserAllocs(t *testing.T) {
 				DataLenPresent: true,
 			})
 		}
-		require.Zero(t, testFrameParserAllocs(t, frames))
+		allocs := testFrameParserAllocs(t, frames)
+		// The race runtime deliberately drops some sync.Pool entries.
+		// Keep all frame-content checks under -race, but measure the
+		// zero-allocation contract only with the ordinary runtime.
+		if israce.Enabled {
+			t.Logf("STREAM parsing verified; race-mode pool allocations: %g", allocs)
+		} else {
+			require.Zero(t, allocs)
+		}
 	})
 
 	t.Run("ACK", func(t *testing.T) {
