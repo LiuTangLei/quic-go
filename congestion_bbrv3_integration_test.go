@@ -86,7 +86,8 @@ func TestBBRv3RealQUICDuplexAndIdle(t *testing.T) {
 			}
 			spc, cpc := packet(), packet()
 			cfg := &quic.Config{InitialPacketSize: 1200, DisablePathMTUDiscovery: true, MaxIdleTimeout: 30 * time.Second, HandshakeIdleTimeout: 10 * time.Second, MaxIncomingStreams: 16}
-			cfg.EnableBBRv3CongestionControl()
+			// Deliberately leave all legacy congestion selector flags unset:
+			// the real sockets must use BBRv3 by default, not just by opt-in.
 			ln, err := quic.Listen(spc, serverTLS, cfg.Clone())
 			if err != nil {
 				t.Fatal(err)

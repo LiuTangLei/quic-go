@@ -1,92 +1,156 @@
-# Lightly tuned BBRv3 and lower-overhead sampling — 2026-09-23
+# Lightly tuned BBRv3: implementation and validation
 
-## Scope and release status
+Date: 2026-09-23. Development branch: `perf/bbrv3-default-20260923`.
+Base: `3859dc05517a8dd5fb46a4e549e880a053b78455`, which already contains the
+bounded DATAGRAM group allocation and event-driven, actual-FIN-ACK fixes.
+This work does not rewrite a published tag or install production binaries.
 
-Branch: `perf/bbrv3-default-20260923`, based on `3859dc05` (the preceding DATAGRAM group-allocation and event-driven FIN-ACK candidate). Published `v0.63.0-quic.2` and the default branch are not rewritten. No application dependency pin or production service is changed by this candidate.
+## One production congestion controller
 
-The public introduction is deliberately simple: **lightly tuned BBRv3**. Tailscale and Tailcat remain independent consumers of this shared library.
+A nil/zero Config, legacy selection helpers, contradictory legacy flag combinations,
+and connection migration now all instantiate the same lightly tuned BBRv3 sender.
+`CongestionControlName()` and live connection statistics keep the stable name
+`bbr-v3`. Applications need no new configuration field, selector or wire negotiation.
 
-## One production policy
+The old exported EnableBBR/EnableCubic fields and helper names remain deprecated
+source-compatibility shims. Some existing Tailscale integration code inspects the
+requested bit before Dial, so the old helper preserves that request bit. At Config
+normalization and actual sender construction, it always becomes BBRv3. Those old
+names no longer select BBRv1, CUBIC or Reno. Reference implementations and their
+unit tests remain in the internal package; production construction/migration no
+longer references their constructors. Source compatibility does not promise the
+old congestion behavior; consumers requiring it must retain their old dependency.
 
-Nil/zero Config, explicit v3 configuration, legacy flags and legacy setter calls all create BBRv3. Path migration also creates BBRv3 directly. The old code used to construct a Reno/CUBIC object before replacing it with BBR; that redundant construction is gone. There is no selectable Reno/CUBIC/BBRv1 branch in production handler creation or migration.
+Congestion control is distinct from receiver stream/connection flow control.
+HTTP/3 flow-control windows, authenticated peer admission, TLS/QUIC encryption,
+anti-amplification, ACK/loss recovery and bounded application queues are preserved.
+The previously implemented BBRv3 integration does not implement an ECN CE response,
+so it continues not to advertise ECN capability rather than silently ignoring CE.
 
-Old fields and setters are retained as deprecated source-compatibility aliases. Some existing Tailscale integration tests inspect EnableBBR immediately after calling the old helper, so that historical request bit is preserved until configuration population. The active normalized flags and actual controller still select v3, and diagnostics always say `bbr-v3`. Keeping a field name does not keep an alternative algorithm. Historical implementation/reference tests remain in the source tree; they are not advertised production choices.
+## The limited tuning
 
-This changes congestion behavior intentionally, not QUIC negotiation or packet framing. Code that requires exact old controller behavior must retain its previous dependency version. No mixed old/new WAN test is claimed here.
-
-## Deliberately small tuning
-
-| Parameter | Previous fork v3 | Candidate |
+| Parameter | Previous fork v3 policy | Candidate |
 | --- | --- | --- |
-| Randomized bandwidth reprobe wait | 2–3 seconds | 1–2 seconds |
-| Long-term inflight headroom | 15% | 10% |
-| Startup gain / Drain gain | 2.77 / 0.5 | unchanged |
-| Probe UP / DOWN gain | 1.25 / 0.90 | unchanged |
+| Time-based bandwidth reprobe wait | 2 to <3 seconds | 1 to <2 seconds |
+| Long-term inflight headroom | 15% (at least one datagram) | 10% (at least one datagram) |
+| UP pacing gain | 1.25 | unchanged |
+| Startup / drain gain | 2.77 / 0.5 | unchanged |
 | Loss threshold / reduction factor | 2% / 0.7 | unchanged |
-| ProbeRTT interval / minimum duration | 5 seconds / 200 ms | unchanged |
-| Initial window / cwnd limits / pacing | existing bounded values | unchanged |
+| ProbeRTT | existing 5-second scheduling, 200 ms minimum duration | unchanged |
 
-The intent is quicker bandwidth rediscovery and somewhat higher utilization, not reproducing the draft's fairness tradeoff. The 10% margin is not removed, loss still ends upward probing, and ongoing loss still reduces the model. ProbeRTT, anti-amplification, cryptography, authentication, packet loss detection and receiver flow control are not disabled.
+The intent is quicker rediscovery of spare capacity and slightly less unused
+inflight margin, not reproducing the draft's exact coexistence tradeoff. Random
+probe jitter remains. Probe loss still exits UP, and minimum/maximum windows,
+saturating arithmetic, pacing and recovery remain enforced. More aggressive
+probing may increase competing-flow pressure or tail latency; no fairness or
+all-path speed improvement is claimed.
 
-Reference algorithm: https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html . This fork is a tuned QUIC adaptation, not the Linux TCP module or a claim of formal draft equivalence.
+Algorithm baseline: [IETF BBR draft revision 06](https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html).
+That draft is experimental and is not a certification of this adaptation.
 
-## Lower CPU allocation overhead
+## Lower CPU/allocation cost without changing delivery arithmetic
 
-The bandwidth sampler previously allocated a sent-state object and a sample object per delivered packet. Sent-state records are now compact inline map values; Get/Remove return independent snapshots and ACK returns a sample by value. ACK takes/removes the record rather than performing an extra lookup followed by removal. Packet-number ordering, duplicate suppression, app-limited sample state and loss/discard semantics remain.
+`ConnectionStates` now stores compact sent-state values inline in the existing
+packet-number map instead of allocating a separate record for every packet.
+`BandwidthSample` is returned by value rather than as a newly allocated object.
+ACK removes and retrieves its record together before calculating the same sample;
+BBRv3 retains a value snapshot when it needs transmission-time metadata.
 
-The per-packet record stays below Go's 128-byte inline-map threshold, enforced by a regression. No recycling of borrowed payload buffers, new pool, timer or worker is introduced. Map capacity can remain at a previous peak: this reduces ongoing object churn, not a guarantee of lower idle RSS on every workload.
+This is not FIFO retirement. ACKs can arrive out of order, and lost/discarded or
+duplicate packet notifications cannot release unrelated records or inflate byte
+accounting. Snapshot tests cover reverse ACK order, loss, discard, duplicate
+insertion/ACK/loss, ACK-only packets and retained copies. A size guard covers
+future growth that would defeat inline map storage in the tested Go runtime.
 
-### Paired local benchmark
+The map still allocates on initialization/growth and retains bucket capacity.
+Zero steady-state per-packet objects is not zero connection memory, a bounded
+whole-process RSS promise, or removal of all allocation throughout QUIC.
 
-Same Apple M4, Go 1.27.1, GOMAXPROCS=1, three 200-ms samples before and after. Each iteration is a complete synthetic flight; times are ns/flight, not ns/packet. No socket or encryption cost is included.
+### Same-fixture microbenchmarks
 
-| Workload | Before median ns | Final candidate median ns | Before allocations | Final allocations (reported average) |
-| --- | ---: | ---: | ---: | ---: |
-| Sampler, 32 packets | 1987 | 1741 | 64 | 0 |
-| Full v3 bookkeeping, 32 packets | 4402 | 4295 | 64 | 0 |
-| Sampler, 512 packets | 33976 | 28780 | 1024 | 0 |
-| Full v3 bookkeeping, 512 packets | 72874 | 69005 | 1024 | 0 |
+Apple M4, Go 1.27.1, GOMAXPROCS=1. Three 200 ms samples per case, comparing base
+3859dc05 with the candidate. The same benchmark source is overlaid on a clean
+baseline worktree; runtime baseline files are not edited. Each operation sends
+and acknowledges a full synthetic flight of 32 or 512 packets, with 50 ms virtual
+RTT. It does not exercise real UDP sockets, packet encryption or application code.
 
-For 512 packets, sampler time fell about 15.3% and full v3 bookkeeping about 5.3%. The allocation-only intermediate build measured 67849 ns for full v3, but the table uses the final tuned code rather than selecting the best intermediate result.
+| Case | Baseline median ns/flight | Candidate median ns/flight | Allocations baseline / candidate |
+| --- | ---: | ---: | ---: |
+| Sampler, 32 packets | 2698 | 1862 | 64 / 0 |
+| BBRv3 bookkeeping, 32 packets | 5604 | 4485 | 64 / 0 |
+| Sampler, 512 packets | 52613 | 29691 | 1024 / 0 |
+| BBRv3 bookkeeping, 512 packets | 109455 | 72216 | 1024 / 0 |
 
-Final 512-packet full-v3 measurements still averaged about 61–62 B/iteration from amortized map setup/growth. `0 allocs/op` is the benchmark's rounded average, not a claim that a new connection never allocates. Previous full-v3 bookkeeping used about 65560 B/iteration.
+Raw ns/flight samples:
 
-Raw before triples (ns): sampler32 [1980,1987,1990]; v3-32 [4402,4395,4547]; sampler512 [33033,33976,34624]; v3-512 [71740,74549,72874].
-Final triples: sampler32 [1746,1736,1741]; v3-32 [4282,4305,4295]; sampler512 [28782,28780,28515]; v3-512 [68675,69005,69638].
+- Sampler/32: base 2411, 2844, 2698; candidate 1812, 1862, 1867.
+- BBRv3/32: base 8104, 5271, 5604; candidate 4465, 4501, 4485.
+- Sampler/512: base 41748, 52613, 68928; candidate 29691, 29691, 30220.
+- BBRv3/512: base 109455, 115991, 107683; candidate 92431, 72216, 70750.
 
-## Application compatibility
+32-packet allocation bytes drop from 4096 B/op to 0 B/op. At 512 packets, baseline
+is about 65541–65583 B/op and candidate about 20–70 B/op, representing amortized
+map initialization/growth. The samples contain scheduler/load variation. The
+BBRv3-case median reductions are about 20% and 34%, not measured whole-process
+CPU reductions or WAN throughput gains. Baseline and candidate also differ in the
+probe tuning, so sampler-only figures better isolate the storage change.
 
-The Tailscale integration at b4f1aa3cd and Tailcat application at f4af70cbe were built with the new QUIC source through external, test-only modfiles. No application source patch was needed. Tailscale wgtransport/quicip/transportprofile tests and targeted authentication, revocation, MSS, batch and close race checks passed. Tailcat full application/CLI/web tests passed. The final serialized Tailcat race suite is recorded in the task evidence, not inferred from a compile.
+## Compatibility and correctness validation
 
-New checks cover all eight old flag combinations, nil/zero Config, setter compatibility, production controller identity, migration identity, inherited ECN policy, record snapshots, duplicate ACK/loss, reordered ACKs, discard retirement, probe-wait bounds, retained headroom and loss stopping UP. Generic mock-controller/ECN tests explicitly use their mock's wire packet numbering; separate production tests require v3's cross-space sequence.
+- Final `go test -short ./...` passes under Go 1.27.1.
+- QUIC / HTTP3 / ACK handling / congestion / TLS short race suites pass.
+- `go vet ./...`, formatting and diff checks pass.
+- Whole-tree Windows amd64 and Linux ARMv7 cross-builds pass.
+- Zero/nil configs, all eight legacy flag combinations, helper aliases and actual
+  handler construction/migration report/select only BBRv3.
+- The real socket duplex test deliberately no longer opts in to BBRv3. Default
+  client/server controllers are checked, with 10 MiB in each direction per
+  scenario, concurrent streams and idle recovery, with and without deterministic
+  loss every 97 datagrams on each endpoint. Both scenarios pass with integrity.
+- The serialized 4 Mbps / 60 ms virtual link test with deterministic 1% packet
+  drops completes both directions and resumes after 12 seconds idle, for standard
+  and Chromium-inspired handshakes. Recorded virtual goodput is approximately
+  3.39–3.59 Mbps; this is a simulated recovery regression, not Internet speed.
+- Tailscale integration at b4f1aa3cd passes wgtransport and subpackages, quicip,
+  and transportprofile tests with the candidate QUIC module.
+- Tailcat f4af70cbe, using its unchanged public integration pin, passes its complete
+  application/CLI/web suite and serialized race suite with the candidate module.
+  Consumer go.mod files remain unchanged; overrides live in external test modfiles.
 
-The library full short suite, focused race suite, go vet and Windows amd64/Linux ARMv7 cross-builds passed. Real loopback duplex/loss/idle and serialized-link loss/idle regressions passed. Existing event-driven FIN acknowledgment and bounded DATAGRAM allocation fixes remain.
+### A failure that is not hidden
 
-## WAN evidence — limited, not an acceptance pass
+The first full short run in this continuation hit a single stochastic
+`TestHandshakeWithPacketLoss` timeout at handshake_drop_test.go:113: 1/3 packet
+loss in both directions, no Retry, server speaks first. The failing path did not
+finish its server-first transfer within the virtual-time budget. That test was
+not deleted, skipped, loosened or changed to select another controller.
 
-AU server / US1420 client, normal Tailcat CLI, eight measured seconds plus two explicitly omitted warmup seconds per throughput sample. Both versions use the same application commit and public integration pin. Baseline uses published QUIC v0.63.0-quic.2; candidate includes the preceding DATAGRAM/FIN-ACK work, inline sampling and v3 tuning together. This is not an ablation isolating the two tuning constants.
+Twenty complete repetitions on this candidate and twenty on the clean 3859dc05
+baseline then passed. A final full short run also passed. The original random
+seed was not logged, so the exact failing loss schedule was not reproduced and
+no root-cause fix or proof of flakiness is claimed. Keep this as an open stress
+validation item before calling the change production-ready.
 
-| Direction | TCP streams | Baseline run 1 Mbps | Candidate run 1 Mbps | Candidate run 2 Mbps |
-| --- | ---: | ---: | ---: | ---: |
-| US1420 to AU | 1 | 242.64 | 277.66 | 300.01 |
-| AU to US1420 | 1 | 247.72 | 265.24 | 252.16 |
-| US1420 to AU | 4 | 338.62 | 362.05 | 303.87 |
-| AU to US1420 | 4 | 241.34 | 299.65 | 258.99 |
+## Build identities and WAN evidence limits
 
-All shown throughput samples completed, with direct H3 evidence, exact sequential/concurrent content checks and idle recovery. Loaded echo errors were zero. Candidate run 1 additionally completed UDP Go API probes at 64/512/1200 bytes, 20 each, all 60 returned. No claim of zero underlying packet loss follows from this.
+The resumed Linux Tailcat test build has SHA-256
+`3b3d48b5ff92df5a9633961e56b7aacc5319f601c92241fa9f1bfa5289a1e9bc`;
+its macOS arm64 counterpart is
+`daf1f6bf2e5f9be8d87b2c7e4fd12303e70ebc14fc337234347240fc38ac9208`.
+These are explicitly test-only artifacts, not a republished v0.7.0-quic.2.
 
-The forward four-stream candidate range spans below and above the baseline. Reverse loaded p95 was 194.50 ms in the baseline four-stream sample, versus 383.19 / 342.41 ms in the candidate. These small samples are not a universal speed or latency improvement. The reciprocal-order second baseline was attempted but timed out uploading the test executable before any benchmark; no second baseline report/result exists. Do not report this as a completed balanced A/B experiment.
+Earlier saved WAN candidate records under `bbrv3-default-20260923` refer to Linux
+hash `cc6f68d515e8096b89e4d8afc11eb35815f37926e55b474ce7f82b2ddab4d63c`.
+Their build is not byte-identical to the resumed candidate; additionally one
+record lacks a final cleanup result. They are retained as historical evidence
+and are NOT used as throughput/CPU acceptance for the final tree.
 
-Candidate run 1 printed complete measurements but the outer command timed out at 170 seconds before recording cleanup_errors. A subsequent direct readback found no test processes on either host and unchanged production tailscaled PIDs (AU 498522, US1420 219468). Candidate run 2 completed normally with cleanup_errors=[]. Baseline run 1 also recorded cleanup_errors=[]. The attempted final remote cleanup/readback after the failed second baseline upload was blocked by the tool's safety check and was not retried through an equivalent route. The failed upload directory `/dev/shm/tailcat-pair.4ScCdL1N` was not independently rechecked afterward; no claim of fully verified final cleanup is made.
+A fresh bounded Tailcat AU/US test launch using the resumed binary was blocked
+by the execution tool. It was not retried through another agent, host or runner.
+No fresh WAN throughput number, equal-load process CPU reduction, mixed-version
+network matrix or multi-hour stress result is claimed for this final candidate.
 
-Whole-run CPU averages from candidate run 1 are not directly comparable because it additionally ran UDP probes. For the matching no-UDP baseline run 1 and candidate run 2, client mean was 35.3% versus 35.4% of one core; server mean 46.6% versus 46.1%. These do not establish a material whole-process CPU reduction. Client peak RSS was 84.3 versus 77.9 MiB and server peak RSS 87.2 versus 84.7 MiB, but one sample does not establish a memory improvement either.
-
-Executable hashes:
-- Baseline Linux: 60b515f76dcc7f7d7a5ea02f84de41ea6319bfca22515ccd187c3137151cae00
-- Candidate Linux: cc6f68d515e8096b89e4d8afc11eb35815f37926e55b474ce7f82b2ddab4d63c
-
-These are test binaries marked test_only, not new application releases. Private raw files are in the Mac audit directory `tailscale-all/audits/bbrv3-default-20260923`. Do not commit private connection credentials or infrastructure logs into the public repository.
-
-## Remaining release limits
-
-No fresh Tailscale kernel-TUN WAN benchmark, mixed-version WAN matrix, multi-hour stress or fairness study was completed in this task. The change is pushed as a candidate branch only; production daemons, official module pins, GitHub Actions settings, release tags and default branches remain unchanged. The next publication should use a clean public immutable pin and repeat balanced throughput/CPU/loaded-latency measurements before being described as a broadly faster release.
+Artifacts and test-only module files are on the Mac under
+`tailscale-all/audits/bbrv3-default-20260923`. Only this development source branch
+is changed; the published v0.63.0-quic.2 tag, production binaries, application
+pins, node state and disabled library Actions settings are not changed.
