@@ -229,8 +229,14 @@ func (b *bbrv3Sender) OnApplicationLimited(inflight protocol.ByteCount) {
 	}
 	// QUIC may have drained its send queue while a full pipe is still in
 	// flight. That is not evidence that the network wasn't being probed.
-	if b.mode == bbrv3Startup && b.BandwidthEstimate() > 0 && inflight >= b.inflight(1.5) {
-		return
+	if b.BandwidthEstimate() > 0 {
+		gain := .9
+		if b.mode == bbrv3Startup {
+			gain = 1.5
+		}
+		if inflight >= b.inflight(gain) {
+			return
+		}
 	}
 	b.sampler.OnAppLimited()
 	b.connStats.ApplicationLimitedRTTSamples.Add(1)
@@ -398,7 +404,8 @@ func (b *bbrv3Sender) OnCongestionEvent(number protocol.PacketNumber, lostBytes,
 		// send-time flight, not the much smaller flight at late loss detection.
 		previousFlight := max(0, meta.inflight-size)
 		previousLost := max(0, lost-size)
-		prefix := protocol.ByteCount((bbrv3LossThreshold*float64(previousFlight) - float64(previousLost)) / (1 - bbrv3LossThreshold))
+		threshold := b.lossThreshold()
+		prefix := protocol.ByteCount((threshold*float64(previousFlight) - float64(previousLost)) / (1 - threshold))
 		atLoss := previousFlight + min(size, max(0, prefix))
 		b.handleInflightTooHigh(b.clock.Now(), atLoss, state.isAppLimited)
 	}
@@ -576,7 +583,20 @@ func (b *bbrv3Sender) raiseInflightSlope() {
 	b.probeUpAckedPerIncrement = max(b.maxDatagramSize, b.congestionWindow/protocol.ByteCount(growth))
 }
 func (b *bbrv3Sender) inflightTooHigh(lost, inflight protocol.ByteCount) bool {
-	return inflight > 0 && float64(lost) > bbrv3LossThreshold*float64(inflight)
+	return lost > 0 && inflight > 0 && float64(lost) > b.lossThreshold()*float64(inflight)
+}
+
+func (b *bbrv3Sender) lossThreshold() float64 {
+	// Established paths with no standing queue get extra random-loss
+	// tolerance. Startup and inflated RTT retain the base 2% response;
+	// short-term bounds still react to every loss round.
+	if b.fullBandwidthReached && b.hasRTTSample && b.minRtt > 0 {
+		rtt := max(b.rttStats.LatestRTT(), b.rttStats.SmoothedRTT())
+		if rtt > 0 && rtt <= b.minRtt+max(time.Millisecond, b.minRtt/8) {
+			return .08
+		}
+	}
+	return bbrv3LossThreshold
 }
 func (b *bbrv3Sender) handleInflightTooHigh(now monotime.Time, flight protocol.ByteCount, appLimited bool) {
 	b.prevProbeTooHigh, b.isBWProbeSample = true, false

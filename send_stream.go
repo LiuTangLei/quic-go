@@ -3,6 +3,7 @@ package quic
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -524,6 +525,7 @@ func (s *SendStream) popRetransmissionFrame(maxBytes protocol.ByteCount, v proto
 		f = newFrame
 		hasMore = true
 	} else {
+		s.retransmissionQueue[0] = nil
 		s.retransmissionQueue = s.retransmissionQueue[1:]
 		hasMore = len(s.retransmissionQueue) > 0
 	}
@@ -949,7 +951,23 @@ func (s *sendStreamAckHandler) OnLost(f wire.Frame) {
 
 	sf.DataLenPresent = true
 	wasEmpty := len(s.retransmissionQueue) == 0
-	s.retransmissionQueue = append(s.retransmissionQueue, sf)
+	// Packet-number loss order is not stream-offset order. Repair an old
+	// retransmission hole before newer queued bytes. First-loss batches
+	// still use the constant-time append path.
+	if wasEmpty || s.retransmissionQueue[len(s.retransmissionQueue)-1].Offset <= sf.Offset {
+		s.retransmissionQueue = append(s.retransmissionQueue, sf)
+	} else {
+		i, _ := slices.BinarySearchFunc(s.retransmissionQueue, sf.Offset, func(f *wire.StreamFrame, off protocol.ByteCount) int {
+			if f.Offset < off {
+				return -1
+			}
+			if f.Offset > off {
+				return 1
+			}
+			return 0
+		})
+		s.retransmissionQueue = slices.Insert(s.retransmissionQueue, i, sf)
+	}
 	s.mutex.Unlock()
 
 	if wasEmpty {

@@ -1674,16 +1674,17 @@ func TestSendStreamResetStreamAtRetransmissions(t *testing.T) {
 	require.True(t, mockCtrl.Satisfied())
 	cf.Handler.OnAcked(cf.Frame)
 
-	// // the retransmission of f1 should be truncated to 6 bytes
+	// Repair the earliest hole first, irrespective of loss notification
+	// order. f2 must still be truncated at the reliable boundary (10).
 	r1, hasMore := str.popRetransmissionFrame(protocol.MaxByteCount, protocol.Version1)
 	require.EqualExportedValues(t,
-		&wire.StreamFrame{StreamID: 1337, Offset: 5, Data: []byte("ipsum"), DataLenPresent: true},
+		&wire.StreamFrame{StreamID: 1337, Data: []byte("lorem"), DataLenPresent: true},
 		r1.Frame,
 	)
 	require.True(t, hasMore)
 	r2, hasMore := str.popRetransmissionFrame(protocol.MaxByteCount, protocol.Version1)
 	require.EqualExportedValues(t,
-		&wire.StreamFrame{StreamID: 1337, Data: []byte("lorem"), DataLenPresent: true},
+		&wire.StreamFrame{StreamID: 1337, Offset: 5, Data: []byte("ipsum"), DataLenPresent: true},
 		r2.Frame,
 	)
 	require.False(t, hasMore)
