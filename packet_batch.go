@@ -12,6 +12,23 @@ type PacketBatchWriter interface {
 	WritePacketBatch(packets [][]byte, addr net.Addr) error
 }
 
+// PacketBatchSizer optionally opts a portable writer into larger ready batches.
+// Values from 8 through 32 are supported. Other values retain the historical
+// limit of 8. This does not wait for packets or bypass congestion pacing.
+type PacketBatchSizer interface {
+	PacketBatchWriter
+	MaxPacketBatchSize() int
+}
+
+func (c *sconn) batchSize() int {
+	if basic, ok := c.rawConn.(*basicConn); ok {
+		if writer, ok := basic.PacketConn.(PacketBatchSizer); ok {
+			return writer.MaxPacketBatchSize()
+		}
+	}
+	return sendQueueCapacity
+}
+
 // Only the basic (non-OOB) path can use this portable batching capability.
 // Kernel GSO continues to use its existing path. The remote endpoint snapshot
 // is taken once per batch, as it is for one ordinary Write call.

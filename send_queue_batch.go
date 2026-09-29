@@ -6,11 +6,12 @@ import "github.com/quic-go/quic-go/internal/protocol"
 // Every dequeued packet is released exactly once even when a writer fails.
 func (h *sendQueue) writeReadyBatch(entries []queueEntry) error {
 	defer func() {
+		clear(h.batchData[:len(entries)])
 		for _, e := range entries {
 			e.buf.Release()
 		}
 	}()
-	var data [sendQueueCapacity][]byte
+	data := h.batchData
 	for i := 0; i < len(entries); {
 		e := entries[i]
 		if e.gsoSize != 0 || e.ecn != protocol.ECNUnsupported {

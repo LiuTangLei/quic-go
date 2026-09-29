@@ -28,24 +28,39 @@ type sendQueue struct {
 	available   chan struct{}
 	conn        sendConn
 	batchWrite  func([][]byte) error
+	batchData   [][]byte // owned by Run; cleared after every synchronous write
 }
 
 var _ sender = &sendQueue{}
 
 const sendQueueCapacity = 8
+const maxPortableBatchSize = 32
 
 func newSendQueue(conn sendConn) sender {
 	var batchWrite func([][]byte) error
 	if c, ok := conn.(interface{ batchWriter() func([][]byte) error }); ok {
 		batchWrite = c.batchWriter()
 	}
+	capacity := sendQueueCapacity
+	if batchWrite != nil {
+		if c, ok := conn.(interface{ batchSize() int }); ok {
+			if n := c.batchSize(); n >= sendQueueCapacity && n <= maxPortableBatchSize {
+				capacity = n
+			}
+		}
+	}
+	var batchData [][]byte
+	if batchWrite != nil {
+		batchData = make([][]byte, capacity)
+	}
 	return &sendQueue{
 		batchWrite:  batchWrite,
+		batchData:   batchData,
 		conn:        conn,
 		runStopped:  make(chan struct{}),
 		closeCalled: make(chan struct{}),
 		available:   make(chan struct{}, 1),
-		queue:       make(chan queueEntry, sendQueueCapacity),
+		queue:       make(chan queueEntry, capacity),
 	}
 }
 
@@ -56,7 +71,7 @@ func (h *sendQueue) Send(p *packetBuffer, gsoSize uint16, ecn protocol.ECN) {
 	select {
 	case h.queue <- queueEntry{buf: p, gsoSize: gsoSize, ecn: ecn}:
 		// clear available channel if we've reached capacity
-		if len(h.queue) == sendQueueCapacity {
+		if len(h.queue) == cap(h.queue) {
 			select {
 			case <-h.available:
 			default:
@@ -73,7 +88,7 @@ func (h *sendQueue) SendProbe(p *packetBuffer, addr net.Addr, info packetInfo) {
 }
 
 func (h *sendQueue) WouldBlock() bool {
-	return len(h.queue) == sendQueueCapacity
+	return len(h.queue) == cap(h.queue)
 }
 
 func (h *sendQueue) Available() <-chan struct{} {
@@ -94,11 +109,11 @@ func (h *sendQueue) Run() error {
 			shouldClose = true
 		case e := <-h.queue:
 			if h.batchWrite != nil {
-				var ready [sendQueueCapacity]queueEntry
+				var ready [maxPortableBatchSize]queueEntry
 				ready[0] = e
 				n := 1
 			drainReady:
-				for n < len(ready) {
+				for n < cap(h.queue) {
 					select {
 					case next := <-h.queue:
 						ready[n] = next

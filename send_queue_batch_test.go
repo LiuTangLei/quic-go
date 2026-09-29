@@ -3,9 +3,57 @@ package quic
 import (
 	"bytes"
 	"errors"
-	"github.com/quic-go/quic-go/internal/protocol"
+	"fmt"
 	"testing"
+
+	"github.com/quic-go/quic-go/internal/protocol"
 )
+
+type sizedBatchTestConn struct {
+	*batchTestConn
+	size int
+}
+
+func (c *sizedBatchTestConn) batchSize() int { return c.size }
+
+func TestSendQueueNegotiatedCapacity(t *testing.T) {
+	for _, size := range []int{-1, 0, 1, 8, 16, 32, 33, 1024} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			c := &sizedBatchTestConn{batchTestConn: &batchTestConn{}, size: size}
+			q := newSendQueue(c).(*sendQueue)
+			want := sendQueueCapacity
+			if size >= 8 && size <= 32 {
+				want = size
+			}
+			if cap(q.queue) != want {
+				t.Fatalf("capacity=%d want=%d", cap(q.queue), want)
+			}
+			for i := range want {
+				if q.WouldBlock() {
+					t.Fatal("premature backpressure")
+				}
+				b := getPacketBuffer()
+				b.Data = append(b.Data[:0], byte(i))
+				q.Send(b, 0, protocol.ECNUnsupported)
+			}
+			if !q.WouldBlock() {
+				t.Fatal("missing bounded backpressure")
+			}
+			close(q.closeCalled)
+			if err := q.Run(); err != nil {
+				t.Fatal(err)
+			}
+			if len(c.packets) != want || c.batches != 1 {
+				t.Fatal("ready batch lost or split")
+			}
+			for i, p := range c.packets {
+				if !bytes.Equal(p, []byte{byte(i)}) {
+					t.Fatal("wire boundaries or order changed")
+				}
+			}
+		})
+	}
+}
 
 type batchTestConn struct {
 	sendConn
