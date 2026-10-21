@@ -116,7 +116,7 @@ func TestBrowserQUICVerificationCannotBeBypassed(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer l.Close()
-	for _, kind := range []string{"wrong-host", "unknown-root", "wrong-pin", "wrong-peer-certificate", "unknown-profile", "wrong-alpn", "session-cache", "ech"} {
+	for _, kind := range []string{"wrong-host", "unknown-root", "wrong-pin", "wrong-peer-certificate", "unknown-profile", "wrong-alpn", "session-cache-wrong-pin", "ech"} {
 		t.Run(kind, func(t *testing.T) {
 			cfg := clientTLS.Clone()
 			qc := &Config{ClientHelloProfile: "chromium-h3", HandshakeIdleTimeout: time.Second}
@@ -136,8 +136,10 @@ func TestBrowserQUICVerificationCannotBeBypassed(t *testing.T) {
 				qc.ClientHelloProfile = "chrome-invented"
 			case "wrong-alpn":
 				cfg.NextProtos = []string{"not-h3"}
-			case "session-cache":
+			case "session-cache-wrong-pin":
 				cfg.ClientSessionCache = tls.NewLRUClientSessionCache(2)
+				cfg.InsecureSkipVerify = true
+				cfg.VerifyConnection = func(tls.ConnectionState) error { return verificationErr }
 			case "ech":
 				cfg.EncryptedClientHelloConfigList = []byte{1, 2, 3}
 			}
@@ -159,7 +161,7 @@ func TestBrowserQUICVerificationCannotBeBypassed(t *testing.T) {
 				if !errors.As(err, &unknownAuthority) {
 					t.Fatalf("certificate authority verification cause lost: %v", err)
 				}
-			case "wrong-pin", "wrong-peer-certificate":
+			case "wrong-pin", "wrong-peer-certificate", "session-cache-wrong-pin":
 				if !errors.Is(err, verificationErr) {
 					t.Fatalf("verification callback cause lost: %v", err)
 				}

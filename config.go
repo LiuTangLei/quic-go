@@ -131,6 +131,7 @@ func populateConfig(config *Config) *Config {
 		DisablePathMTUDiscovery:          config.DisablePathMTUDiscovery,
 		EnableStreamResetPartialDelivery: config.EnableStreamResetPartialDelivery,
 		Allow0RTT:                        config.Allow0RTT,
+		DeferSessionTicket:               config.DeferSessionTicket,
 		Tracer:                           config.Tracer,
 	}
 }

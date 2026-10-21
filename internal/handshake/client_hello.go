@@ -44,10 +44,13 @@ func (c standardQUICConn) ExportKeyingMaterial(label string, context []byte, len
 const ChromiumH3Profile = "chromium-h3"
 
 type browserQUICConn struct {
-	c       *utls.UQUICConn
-	config  *tls.Config
-	params  []byte
-	started bool
+	c               *utls.UQUICConn
+	config          *tls.Config
+	params          []byte
+	started         bool
+	pendingStandard *tls.SessionState
+	pendingBrowser  *utls.SessionState
+	pendingStore    *utls.SessionState
 }
 
 func newBrowserQUICConn(config *tls.Config, profile string) (quicTLSConn, error) {
@@ -60,8 +63,8 @@ func newBrowserQUICConn(config *tls.Config, profile string) (quicTLSConn, error)
 	// Do not silently discard authentication/resumption/ECH configuration that
 	// this bounded adapter has not implemented. The caller can use the standard
 	// TLS path, but an explicitly selected profile never silently downgrades.
-	if config.ClientSessionCache != nil || len(config.EncryptedClientHelloConfigList) != 0 || config.EncryptedClientHelloRejectionVerify != nil || config.GetClientCertificate != nil || len(config.CurvePreferences) != 0 {
-		return nil, errors.New("chromium-h3 does not support session cache, ECH, dynamic client certificates or custom curve restrictions")
+	if len(config.EncryptedClientHelloConfigList) != 0 || config.EncryptedClientHelloRejectionVerify != nil || config.GetClientCertificate != nil || len(config.CurvePreferences) != 0 {
+		return nil, errors.New("chromium-h3 does not support ECH, dynamic client certificates or custom curve restrictions")
 	}
 	if config.MinVersion > tls.VersionTLS13 || (config.MaxVersion != 0 && config.MaxVersion < tls.VersionTLS13) {
 		return nil, errors.New("chromium-h3 requires TLS 1.3")
@@ -84,8 +87,13 @@ func (c *browserQUICConn) Start(ctx context.Context) error {
 		Rand: c.config.Rand, Time: c.config.Time, RootCAs: c.config.RootCAs,
 		ServerName: c.config.ServerName, InsecureSkipVerify: c.config.InsecureSkipVerify,
 		MinVersion: utls.VersionTLS13, MaxVersion: utls.VersionTLS13, NextProtos: []string{"h3"},
-		SessionTicketsDisabled: true, KeyLogWriter: c.config.KeyLogWriter,
+		SessionTicketsDisabled: c.config.SessionTicketsDisabled, KeyLogWriter: c.config.KeyLogWriter,
+		OmitEmptyPsk:          true,
 		VerifyPeerCertificate: c.config.VerifyPeerCertificate,
+	}
+	if c.config.ClientSessionCache != nil {
+		u.ClientSessionCache = browserSessionCache{c.config.ClientSessionCache}
+		p.Extensions = append(p.Extensions, &utls.UtlsPreSharedKeyExtension{})
 	}
 	if verify := c.config.VerifyConnection; verify != nil {
 		u.VerifyConnection = func(s utls.ConnectionState) error { return verify(standardConnectionState(s)) }
@@ -97,7 +105,7 @@ func (c *browserQUICConn) Start(ctx context.Context) error {
 		}
 		u.Certificates = append(u.Certificates, uc)
 	}
-	c.c = utls.UQUICClient(&utls.QUICConfig{TLSConfig: u}, utls.HelloCustom)
+	c.c = utls.UQUICClient(&utls.QUICConfig{TLSConfig: u, EnableSessionEvents: true}, utls.HelloCustom)
 	if err := c.c.ApplyPreset(p); err != nil {
 		return err
 	}
@@ -121,6 +129,11 @@ func (c *browserQUICConn) NextEvent() tls.QUICEvent {
 	if c.c == nil {
 		return tls.QUICEvent{Kind: tls.QUICNoEvent}
 	}
+	if c.pendingStandard != nil {
+		c.pendingBrowser.EarlyData = c.pendingStandard.EarlyData
+		c.pendingBrowser.Extra = c.pendingStandard.Extra
+		c.pendingStandard, c.pendingBrowser = nil, nil
+	}
 	e := c.c.NextEvent()
 	out := tls.QUICEvent{Level: tls.QUICEncryptionLevel(e.Level), Suite: e.Suite, Data: e.Data}
 	switch e.Kind {
@@ -143,6 +156,23 @@ func (c *browserQUICConn) NextEvent() tls.QUICEvent {
 		out.Kind = tls.QUICRejectedEarlyData
 	case utls.QUICHandshakeDone:
 		out.Kind = tls.QUICHandshakeDone
+	case utls.QUICResumeSession, utls.QUICStoreSession:
+		encoded, err := e.SessionState.Bytes()
+		if err != nil {
+			return tls.QUICEvent{Kind: tls.QUICErrorEvent, Err: err}
+		}
+		state, err := tls.ParseSessionState(encoded)
+		if err != nil {
+			return tls.QUICEvent{Kind: tls.QUICErrorEvent, Err: err}
+		}
+		out.Kind, out.SessionState = tls.QUICStoreSession, state
+		if e.Kind == utls.QUICResumeSession {
+			out.Kind = tls.QUICResumeSession
+			c.pendingStandard, c.pendingBrowser = state, e.SessionState
+		} else {
+			c.pendingStore = e.SessionState
+		}
+
 	default:
 		out.Kind = tls.QUICErrorEvent
 		out.Err = fmt.Errorf("unsupported chromium-h3 TLS event %d", e.Kind)
@@ -162,8 +192,14 @@ func (c *browserQUICConn) ExportKeyingMaterial(label string, context []byte, len
 	s := c.c.ConnectionState()
 	return s.ExportKeyingMaterial(label, context, length)
 }
-func (*browserQUICConn) StoreSession(*tls.SessionState) error {
-	return errors.New("chromium-h3 session resumption is disabled")
+func (c *browserQUICConn) StoreSession(state *tls.SessionState) error {
+	if c.pendingStore == nil {
+		return errors.New("missing browser session ticket event")
+	}
+	session := c.pendingStore
+	c.pendingStore = nil
+	session.EarlyData, session.Extra = state.EarlyData, state.Extra
+	return c.c.StoreSession(session)
 }
 func (*browserQUICConn) SendSessionTicket(tls.QUICSessionTicketOptions) error {
 	return errors.New("chromium-h3 is client-only")

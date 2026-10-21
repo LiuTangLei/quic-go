@@ -98,10 +98,6 @@ func NewCryptoSetupClient(
 		EnableSessionEvents: true,
 	})}
 	if len(clientHelloProfile) > 0 && clientHelloProfile[0] != "" {
-		// DialEarly is opportunistic and is also the default HTTP/3 dial path.
-		// With resumption disabled it must wait for a fresh handshake, just as
-		// standard TLS does when no usable session ticket is available.
-		cs.allow0RTT = false
 		var customized quicTLSConn
 		customized, cs.initErr = newBrowserQUICConn(tlsConf, clientHelloProfile[0])
 		if cs.initErr == nil {

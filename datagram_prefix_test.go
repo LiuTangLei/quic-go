@@ -12,6 +12,7 @@ import (
 
 func prefixTestConn(limit int) *Conn {
 	c := &Conn{version: protocol.Version1, peerParams: &wire.TransportParameters{MaxDatagramFrameSize: 65536}, datagramQueue: newDatagramQueue(func() {}, utils.DefaultLogger)}
+	c.appliedPeerParams.Store(c.peerParams)
 	c.maxPayloadSizeEstimate.Store(uint32(limit))
 	return c
 }

@@ -209,7 +209,10 @@ type Conn struct {
 	// pacingDeadline is the time when the next packet should be sent
 	pacingDeadline monotime.Time
 
-	peerParams *wire.TransportParameters
+	peerParams *wire.TransportParameters // connection-loop owned
+	// Immutable applied limits for application goroutines. Fresh handshake
+	// parameters must not replace 0-RTT limits before handshake completion.
+	appliedPeerParams atomic.Pointer[wire.TransportParameters]
 
 	timer *time.Timer
 	// keepAlivePingSent stores whether a keep alive PING is in flight.
@@ -217,8 +220,10 @@ type Conn struct {
 	keepAlivePingSent bool
 	keepAliveInterval time.Duration
 
-	datagramQueue    *datagramQueue
-	datagramReceiver atomic.Pointer[datagramReceiveHandler]
+	sessionTicketRequested atomic.Bool
+	sessionTicketSent      bool // connection loop owns ticket issuance
+	datagramQueue          *datagramQueue
+	datagramReceiver       atomic.Pointer[datagramReceiveHandler]
 
 	connStateMutex sync.Mutex
 	connState      ConnectionState
@@ -605,6 +610,13 @@ func (c *Conn) run() (err error) {
 
 runLoop:
 	for {
+		if c.sessionTicketRequested.Load() && !c.sessionTicketSent {
+			c.sessionTicketSent = true
+			if err := c.sendSessionTicket(); err != nil {
+				c.setCloseError(&closeError{err: err})
+				break runLoop
+			}
+		}
 		if c.framer.QueuedTooManyControlFrames() {
 			c.setCloseError(&closeError{err: &qerr.TransportError{ErrorCode: InternalError}})
 			break runLoop
@@ -774,7 +786,8 @@ func (c *Conn) Context() context.Context {
 }
 
 func (c *Conn) supportsDatagrams() bool {
-	return c.peerParams.MaxDatagramFrameSize > 0
+	params := c.appliedPeerParams.Load()
+	return params != nil && params.MaxDatagramFrameSize > 0
 }
 
 // ConnectionState returns basic details about the QUIC connection.
@@ -788,9 +801,9 @@ func (c *Conn) ConnectionState() ConnectionState {
 		c.connState.ClientHelloProfile = c.config.ClientHelloProfile
 	}
 	c.connState.Used0RTT = cs.Used0RTT
-	if c.peerParams != nil {
-		c.connState.SupportsDatagrams.Remote = c.supportsDatagrams()
-		c.connState.SupportsStreamResetPartialDelivery.Remote = c.peerParams.EnableResetStreamAt
+	if params := c.appliedPeerParams.Load(); params != nil {
+		c.connState.SupportsDatagrams.Remote = params.MaxDatagramFrameSize > 0
+		c.connState.SupportsStreamResetPartialDelivery.Remote = params.EnableResetStreamAt
 	}
 	c.connState.SupportsDatagrams.Local = c.config.EnableDatagrams
 	c.connState.SupportsStreamResetPartialDelivery.Local = c.config.EnableStreamResetPartialDelivery
@@ -985,6 +998,40 @@ func (c *Conn) handleHandshakeComplete(now monotime.Time) error {
 		return err
 	}
 
+	if !c.config.DeferSessionTicket {
+		c.sessionTicketSent = true
+		if err := c.sendSessionTicket(); err != nil {
+			return err
+		}
+	}
+	token, err := c.tokenGenerator.NewToken(c.conn.RemoteAddr(), c.rttStats.SmoothedRTT())
+	if err != nil {
+		return err
+	}
+	c.queueControlFrame(&wire.NewTokenFrame{Token: token})
+	c.queueControlFrame(&wire.HandshakeDoneFrame{})
+	return nil
+}
+
+// SendSessionTicket requests the server's deferred TLS ticket. Applications
+// must finish their own authentication before calling this method. At most one
+// ticket is issued, including across repeated calls; TLS runs only in the loop.
+func (c *Conn) SendSessionTicket() error {
+	if c.perspective != protocol.PerspectiveServer || !c.config.DeferSessionTicket {
+		return errors.New("deferred server session tickets are not enabled")
+	}
+	select {
+	case <-c.Context().Done():
+		return context.Cause(c.Context())
+	case <-c.HandshakeComplete():
+	default:
+		return errors.New("TLS handshake is not complete")
+	}
+	c.sessionTicketRequested.Store(true)
+	c.scheduleSending()
+	return nil
+}
+func (c *Conn) sendSessionTicket() error {
 	ticket, err := c.cryptoStreamHandler.GetSessionTicket()
 	if err != nil {
 		return err
@@ -997,12 +1044,6 @@ func (c *Conn) handleHandshakeComplete(now monotime.Time) error {
 			}
 		}
 	}
-	token, err := c.tokenGenerator.NewToken(c.conn.RemoteAddr(), c.rttStats.SmoothedRTT())
-	if err != nil {
-		return err
-	}
-	c.queueControlFrame(&wire.NewTokenFrame{Token: token})
-	c.queueControlFrame(&wire.HandshakeDoneFrame{})
 	return nil
 }
 
@@ -2382,6 +2423,7 @@ func (c *Conn) restoreTransportParameters(params *wire.TransportParameters) {
 	}
 
 	c.peerParams = params
+	c.appliedPeerParams.Store(params)
 	c.connIDGenerator.SetMaxActiveConnIDs(params.ActiveConnectionIDLimit)
 	c.connFlowController.UpdateSendWindow(params.InitialMaxData)
 	c.streamsMap.HandleTransportParameters(params)
@@ -2449,6 +2491,7 @@ func (c *Conn) checkTransportParameters(params *wire.TransportParameters) error 
 
 func (c *Conn) applyTransportParameters() {
 	params := c.peerParams
+	c.appliedPeerParams.Store(params)
 	// Our local idle timeout will always be > 0.
 	c.idleTimeout = c.config.MaxIdleTimeout
 	// If the peer advertised an idle timeout, take the minimum of the values.
@@ -2963,12 +3006,13 @@ func (c *Conn) OpenUniStreamSync(ctx context.Context) (*SendStream, error) {
 }
 
 func (c *Conn) newFlowController(id protocol.StreamID) *streamFlowController {
-	initialSendWindow := c.peerParams.InitialMaxStreamDataUni
+	params := c.appliedPeerParams.Load()
+	initialSendWindow := params.InitialMaxStreamDataUni
 	if protocol.StreamTypeOf(id) == protocol.StreamTypeBidi {
 		if protocol.StreamInitiator(id) == c.perspective {
-			initialSendWindow = c.peerParams.InitialMaxStreamDataBidiRemote
+			initialSendWindow = params.InitialMaxStreamDataBidiRemote
 		} else {
-			initialSendWindow = c.peerParams.InitialMaxStreamDataBidiLocal
+			initialSendWindow = params.InitialMaxStreamDataBidiLocal
 		}
 	}
 	return newStreamFlowController(
@@ -3085,7 +3129,8 @@ func (c *Conn) SendDatagram(p []byte) error {
 // Datagram buffer. Limits apply to the combined payload; transport framing,
 // congestion control, backpressure and unreliable delivery are unchanged.
 func (c *Conn) SendDatagramWithPrefix(prefix, p []byte) error {
-	if !c.supportsDatagrams() {
+	params := c.appliedPeerParams.Load()
+	if params == nil || params.MaxDatagramFrameSize <= 0 {
 		return errors.New("datagram support disabled")
 	}
 
@@ -3093,7 +3138,7 @@ func (c *Conn) SendDatagramWithPrefix(prefix, p []byte) error {
 	// The payload size estimate is conservative.
 	// Under many circumstances we could send a few more bytes.
 	maxDataLen := min(
-		f.MaxDataLen(c.peerParams.MaxDatagramFrameSize, c.version),
+		f.MaxDataLen(params.MaxDatagramFrameSize, c.version),
 		protocol.ByteCount(c.maxPayloadSizeEstimate.Load()),
 	)
 	// Subtraction avoids overflowing an int when accounting for both slices.
@@ -3147,7 +3192,11 @@ func (c *Conn) AddPath(t *Transport) (*Path, error) {
 	if c.perspective == protocol.PerspectiveServer {
 		return nil, errors.New("server cannot initiate connection migration")
 	}
-	if c.peerParams.DisableActiveMigration {
+	params := c.appliedPeerParams.Load()
+	if params == nil {
+		return nil, errors.New("peer transport parameters unavailable")
+	}
+	if params.DisableActiveMigration {
 		return nil, errors.New("server disabled connection migration")
 	}
 	if err := t.init(false); err != nil {

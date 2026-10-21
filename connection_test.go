@@ -3410,6 +3410,9 @@ func testConnectionMigration(t *testing.T, enabled bool) {
 		OriginalDestinationConnectionID: tc.destConnID,
 		DisableActiveMigration:          !enabled,
 	}))
+	// This fixture starts after a synthetic completed handshake. Publish the
+	// parameters that the real handshake-completion path would have applied.
+	tc.conn.appliedPeerParams.Store(tc.conn.peerParams)
 
 	tr := &Transport{
 		Conn:              newUDPConnLocalhost(t),

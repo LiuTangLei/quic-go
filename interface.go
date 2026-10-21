@@ -192,6 +192,9 @@ type Config struct {
 	// Allow0RTT allows the application to decide if a 0-RTT connection attempt should be accepted.
 	// Only valid for the server.
 	Allow0RTT bool
+	// DeferSessionTicket delays the server's single TLS ticket until the
+	// application calls SendSessionTicket after authenticating its peer.
+	DeferSessionTicket bool
 	// Enable QUIC datagram support (RFC 9221).
 	EnableDatagrams bool
 	// Enable QUIC Stream Resets with Partial Delivery.
