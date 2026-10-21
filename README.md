@@ -19,7 +19,7 @@ This is the default branch's development policy. It does not retroactively chang
 
 ## Transport features
 
-- QUIC v1, TLS 1.3 and real HTTP/3 framing on the upstream 0.63 base.
+- QUIC v1, TLS 1.3 and real HTTP/3 framing on the upstream 0.64.1 base.
 - Reliable streams for byte-stream services and bounded QUIC DATAGRAM paths for IP/UDP traffic.
 - Ready-only packet batching and group-owned DATAGRAM storage without waiting to fill a batch.
 - Inline delivery-sampling records and single-take ACK bookkeeping to reduce per-packet allocation and duplicate lookups.

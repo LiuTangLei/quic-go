@@ -17,7 +17,7 @@ func (h *limitedHandler) OnApplicationLimited() { h.calls++ }
 func TestBBRApplicationLimitedOnlyWhenQueuesEmpty(t *testing.T) {
 	h := new(limitedHandler)
 	c := &Conn{config: &Config{EnableBBR: true}, handshakeConfirmed: true, sentPacketHandler: h}
-	c.datagramQueue = newDatagramQueue(func() {}, utils.DefaultLogger)
+	c.datagramQueue = newDatagramQueue(func() {}, utils.DefaultLogger, nil)
 	if err := c.datagramQueue.Add(&wire.DatagramFrame{Data: []byte{1}}); err != nil {
 		t.Fatal(err)
 	}

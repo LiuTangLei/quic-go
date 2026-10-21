@@ -13,7 +13,7 @@ import (
 func TestDatagramBatchOwnershipBoundsAndWake(t *testing.T) {
 	c := prefixTestConn(1400)
 	wakes := 0
-	c.datagramQueue = newDatagramQueue(func() { wakes++ }, utils.DefaultLogger)
+	c.datagramQueue = newDatagramQueue(func() { wakes++ }, utils.DefaultLogger, nil)
 	prefix := []byte{0, 2}
 	packets := make([][]byte, 32)
 	for i := range packets {

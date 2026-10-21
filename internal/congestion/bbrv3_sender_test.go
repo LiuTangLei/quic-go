@@ -33,7 +33,7 @@ func TestBBRv3InitialPolicy(t *testing.T) {
 	require.Equal(t, bbrv3Infinity, b.inflightLongterm)
 	require.Equal(t, bbrv3Infinity, b.inflightShortterm)
 	require.Positive(t, b.pacingRate)
-	require.EqualValues(t, b.pacingRate/BytesPerSecond, b.pacer.adjustedBandwidth())
+	require.EqualValues(t, b.pacingRate/BytesPerSecond, b.pacer.timeScaledBandwidth(time.Second, b.pacingRate))
 }
 
 func TestBBRv3BandwidthPlateauAndApplicationLimited(t *testing.T) {

@@ -769,6 +769,7 @@ func TestSendStreamClose(t *testing.T) {
 	default:
 		t.Fatal("stream context should have been canceled")
 	}
+	require.ErrorIs(t, context.Cause(str.Context()), ErrStreamClosed)
 
 	frame, _, hasMore := str.popStreamFrame(expectedFrameHeaderLen(streamID, 0)+3, protocol.Version1)
 	require.NotNil(t, frame.Frame)
@@ -787,8 +788,8 @@ func TestSendStreamClose(t *testing.T) {
 
 	// further calls to Write return an error
 	_, err = strWithTimeout.Write([]byte("foobar"))
-	require.ErrorContains(t, err, "write on closed stream 1234")
-	require.ErrorContains(t, str.TryWriteAll([]byte("foobar")), "write on closed stream 1234")
+	require.ErrorIs(t, err, ErrStreamClosed)
+	require.ErrorIs(t, str.TryWriteAll([]byte("foobar")), ErrStreamClosed)
 	frame, _, hasMore = str.popStreamFrame(protocol.MaxByteCount, protocol.Version1)
 	require.Nil(t, frame.Frame)
 	require.False(t, hasMore)
@@ -803,7 +804,7 @@ func TestSendStreamClose(t *testing.T) {
 	// shutting down has no effect
 	str.closeForShutdown(errors.New("goodbye"))
 	_, err = strWithTimeout.Write([]byte("foobar"))
-	require.ErrorContains(t, err, "write on closed stream 1234")
+	require.ErrorIs(t, err, ErrStreamClosed)
 }
 
 func TestSendStreamImmediateClose(t *testing.T) {
@@ -1725,6 +1726,11 @@ func TestSendStreamResetStreamAtStopSendingBeforeCancelation(t *testing.T) {
 
 	mockSender.EXPECT().onHasStreamControlFrame(protocol.StreamID(1337), str)
 	str.handleStopSendingFrame(&wire.StopSendingFrame{StreamID: 1337, ErrorCode: 42})
+
+	// setting the reliable boundary after the STOP_SENDING is a no-op
+	str.SetReliableBoundary()
+	f.Handler.OnAcked(f.Frame)
+
 	cf, ok, hasMore := str.getControlFrame(monotime.Now())
 	require.True(t, ok)
 	// Since the peer reset the stream, the resulting RESET_STREAM frame has a reliable size of 0

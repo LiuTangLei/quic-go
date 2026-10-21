@@ -38,7 +38,7 @@ func BenchmarkDatagramPacketDrain(b *testing.B) {
 	for _, size := range []int{64, 1200} {
 		for _, batched := range []bool{false, true} {
 			b.Run(fmt.Sprintf("bytes=%d/batched=%t", size, batched), func(b *testing.B) {
-				q := newDatagramQueue(func() {}, utils.DefaultLogger)
+				q := newDatagramQueue(func() {}, utils.DefaultLogger, nil)
 				var frames [maxDatagramSendQueueLen]*wire.DatagramFrame
 				for i := range frames {
 					frames[i] = &wire.DatagramFrame{DataLenPresent: true, Data: make([]byte, size)}

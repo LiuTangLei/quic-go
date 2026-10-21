@@ -19,8 +19,8 @@ func datagramBatchPacker(t *testing.T, hasReliable bool) *testPacketPacker {
 	ctrl := gomock.NewController(t)
 	tp := newTestPacketPacker(t, ctrl, protocol.PerspectiveServer)
 	tp.ackFramer.EXPECT().GetAckFrame(protocol.Encryption1RTT, gomock.Any(), gomock.Any()).AnyTimes()
-	tp.pnManager.EXPECT().PeekPacketNumber(protocol.Encryption1RTT).Return(protocol.PacketNumber(1), protocol.PacketNumberLen2).AnyTimes()
-	tp.pnManager.EXPECT().PopPacketNumber(protocol.Encryption1RTT).Return(protocol.PacketNumber(1)).AnyTimes()
+	tp.pnManager.EXPECT().PeekPacketNumber(protocol.PacketNumberSpaceAppData).Return(protocol.PacketNumber(1), protocol.PacketNumberLen2).AnyTimes()
+	tp.pnManager.EXPECT().PopPacketNumber(protocol.PacketNumberSpaceAppData).Return(protocol.PacketNumber(1)).AnyTimes()
 	tp.sealingManager.EXPECT().Get1RTTSealer().Return(newMockShortHeaderSealer(ctrl), nil).AnyTimes()
 	tp.framer.EXPECT().HasData().Return(hasReliable).AnyTimes()
 	if hasReliable {

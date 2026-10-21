@@ -11,7 +11,7 @@ import (
 )
 
 func TestDatagramDrainRetainsACKBlockedHead(t *testing.T) {
-	q := newDatagramQueue(func() {}, utils.DefaultLogger)
+	q := newDatagramQueue(func() {}, utils.DefaultLogger, nil)
 	head := &wire.DatagramFrame{DataLenPresent: true, Data: make([]byte, 1000)}
 	require.NoError(t, q.Add(head))
 	ack := &wire.AckFrame{}
@@ -33,7 +33,7 @@ func TestDatagramDrainRetainsACKBlockedHead(t *testing.T) {
 
 func TestDatagramDrainWakesPartialBatchProducer(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		q := newDatagramQueue(func() {}, utils.DefaultLogger)
+		q := newDatagramQueue(func() {}, utils.DefaultLogger, nil)
 		for i := range maxDatagramSendQueueLen {
 			require.NoError(t, q.Add(&wire.DatagramFrame{DataLenPresent: true, Data: []byte{byte(i)}}))
 		}

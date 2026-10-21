@@ -56,7 +56,7 @@ func TestDatagramBatchStorageAcrossBoundedGroups(t *testing.T) {
 		case ready <- struct{}{}:
 		default:
 		}
-	}, utils.DefaultLogger)
+	}, utils.DefaultLogger, nil)
 	packets := make([][]byte, 128)
 	for i := range packets {
 		packets[i] = bytes.Repeat([]byte{byte(i)}, 10+i)

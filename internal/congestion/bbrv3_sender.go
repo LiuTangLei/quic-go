@@ -179,9 +179,7 @@ func NewBBRv3Sender(clock Clock, rttStats *utils.RTTStats, size protocol.ByteCou
 	b.hasRTTSample = b.minRtt > 0
 	b.setMode(bbrv3Startup)
 	b.initPacingRate()
-	b.pacer = newPacer(func() Bandwidth { return b.pacingRate })
-	// Generic Reno/CUBIC pacing adds 25%. BBR already applies its own gains.
-	b.pacer.adjustedBandwidth = func() uint64 { return max(1, uint64(b.pacingRate/BytesPerSecond)) }
+	b.pacer = newPacer()
 	b.pacer.SetMaxDatagramSize(size)
 	b.updateControl(0)
 	return b
@@ -202,10 +200,10 @@ func (b *bbrv3Sender) GetMinRtt() time.Duration {
 }
 func (b *bbrv3Sender) TimeUntilSend(inflight protocol.ByteCount) monotime.Time {
 	b.bytesInFlight = max(0, inflight)
-	return b.pacer.TimeUntilSend()
+	return b.pacer.TimeUntilSend(max(BytesPerSecond, b.pacingRate))
 }
 func (b *bbrv3Sender) HasPacingBudget(now monotime.Time) bool {
-	return b.pacer.Budget(now) >= b.maxDatagramSize
+	return b.pacer.Budget(now, max(BytesPerSecond, b.pacingRate)) >= b.maxDatagramSize
 }
 func (b *bbrv3Sender) CanSend(inflight protocol.ByteCount) bool {
 	b.bytesInFlight = max(0, inflight)
@@ -266,7 +264,7 @@ func (b *bbrv3Sender) OnPacketSent(now monotime.Time, inflight protocol.ByteCoun
 		inflight:    max(size, inflight),
 		cwndLimited: inflight+b.maxDatagramSize >= b.congestionWindow,
 	}
-	b.pacer.SentPacket(now, size)
+	b.pacer.SentPacket(now, size, max(BytesPerSecond, b.pacingRate))
 }
 
 func (b *bbrv3Sender) OnPacketAcked(number protocol.PacketNumber, ackedBytes, priorInFlight protocol.ByteCount, now monotime.Time) {
@@ -419,7 +417,9 @@ func (b *bbrv3Sender) OnPacketDiscarded(number protocol.PacketNumber) {
 
 func (b *bbrv3Sender) SetMaxDatagramSize(size protocol.ByteCount) {
 	if size < b.maxDatagramSize {
-		panic("BBRv3: decreased packet size without path reset")
+		// Initial EMSGSIZE fallback preserves the controller and its packet
+		// budget, reducing the byte window along with the packet size.
+		b.congestionWindow = b.congestionWindow * size / b.maxDatagramSize
 	}
 	b.maxDatagramSize = size
 	b.initialCongestionWindow = 32 * size
@@ -925,3 +925,7 @@ func bbrv3Volume(rate Bandwidth, d time.Duration) protocol.ByteCount {
 	q, _ := bits.Div64(hi, lo, div)
 	return protocol.ByteCount(min(uint64(bbrv3Infinity), q))
 }
+
+// A late ACK of one lost packet does not prove the whole BBR recovery
+// episode spurious. Keep model bounds until normal recovery or explicit proof.
+func (b *bbrv3Sender) OnSpuriousLoss(protocol.PacketNumber) {}

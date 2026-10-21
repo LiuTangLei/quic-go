@@ -289,17 +289,7 @@ func NewBBRSender(clock Clock, rttStats *utils.RTTStats, initialMaxDatagramSize 
 	}
 	// Initialize pacer with pacing rate function (not raw bandwidth estimate)
 	// The pacing rate includes the pacing gain and handles startup properly
-	b.pacer = newPacer(func() Bandwidth {
-		if b.pacingRate > 0 {
-			return b.pacingRate
-		}
-		// Fallback to bandwidth estimate if pacing rate not set yet
-		return b.BandwidthEstimate()
-	})
-
-	// BBR already applies its phase gain to pacingRate. Do not apply the
-	// generic Reno/CUBIC pacer's additional 25% headroom a second time.
-	b.pacer.adjustedBandwidth = func() uint64 { return uint64(b.pacingRate / BytesPerSecond) }
+	b.pacer = newPacer()
 	b.pacer.SetMaxDatagramSize(initialMaxDatagramSize)
 	b.updateStats()
 	return b
@@ -307,11 +297,11 @@ func NewBBRSender(clock Clock, rttStats *utils.RTTStats, initialMaxDatagramSize 
 
 func (b *bbrSender) TimeUntilSend(bytesInFlight protocol.ByteCount) monotime.Time {
 	b.bytesInFlight = bytesInFlight
-	return b.pacer.TimeUntilSend()
+	return b.pacer.TimeUntilSend(b.pacingRate)
 }
 
 func (b *bbrSender) HasPacingBudget(now monotime.Time) bool {
-	return b.pacer.Budget(now) >= b.maxDatagramSize
+	return b.pacer.Budget(now, b.pacingRate) >= b.maxDatagramSize
 }
 
 func (b *bbrSender) OnPacketSent(sentTime monotime.Time, bytesInFlight protocol.ByteCount, packetNumber protocol.PacketNumber, bytes protocol.ByteCount, isRetransmittable bool) {
@@ -352,7 +342,7 @@ func (b *bbrSender) OnPacketSent(sentTime monotime.Time, bytesInFlight protocol.
 		// Pure ACKs are allowed even while pacing-limited. Charging them to
 		// this budget can indefinitely postpone MAX_DATA / MAX_STREAM_DATA
 		// on a receiver whose own delivery-rate estimate is very low.
-		b.pacer.SentPacket(sentTime, bytes)
+		b.pacer.SentPacket(sentTime, bytes, b.pacingRate)
 	}
 }
 
@@ -498,7 +488,9 @@ func (b *bbrSender) OnPacketDiscarded(number protocol.PacketNumber) {
 
 func (b *bbrSender) SetMaxDatagramSize(size protocol.ByteCount) {
 	if size < b.maxDatagramSize {
-		panic("BBR: decreased packet size without path reset")
+		// Initial EMSGSIZE fallback preserves the controller and its packet
+		// budget, reducing the byte window along with the packet size.
+		b.congestionWindow = b.congestionWindow * size / b.maxDatagramSize
 	}
 	b.maxDatagramSize = size
 	b.minCongestionWindow = 4 * size
@@ -914,3 +906,7 @@ func minRtt(a, b time.Duration) time.Duration {
 var (
 	InfiniteRTT = time.Duration(math.MaxInt64)
 )
+
+// A late ACK of one lost packet does not prove the whole BBR recovery
+// episode spurious. Keep model bounds until normal recovery or explicit proof.
+func (b *bbrSender) OnSpuriousLoss(protocol.PacketNumber) {}

@@ -30,10 +30,7 @@ func TestBBRSamplerNumbersDistinctAcrossPacketSpaces(t *testing.T) {
 	var packets packetTracker
 	now := monotime.Now()
 	for _, level := range []protocol.EncryptionLevel{protocol.EncryptionInitial, protocol.EncryptionHandshake, protocol.Encryption1RTT} {
-		pn := h.PopPacketNumber(level)
-		if pn != 0 {
-			t.Fatal("fixture did not reuse wire packet number zero")
-		}
+		pn := h.PopPacketNumber(level.PacketNumberSpace())
 		h.SentPacket(now, pn, protocol.InvalidPacketNumber, nil, []Frame{packets.NewPingFrame(pn)}, level, protocol.ECNNon, 1250, false, false)
 	}
 	if len(recorder.sent) != 3 || recorder.sent[0] >= recorder.sent[1] || recorder.sent[1] >= recorder.sent[2] {
@@ -45,7 +42,7 @@ func TestBBRSamplerNumbersDistinctAcrossPacketSpaces(t *testing.T) {
 		t.Fatal("dropped keyspace leaked samples", recorder.discarded)
 	}
 	h.MigratedPath(now.Add(time.Second), 1200)
-	if !h.useBBR || h.congestion.GetCongestionWindow() != 32*1200 || !h.congestion.InSlowStart() {
+	if h.congestion.GetCongestionWindow() != 32*1200 || !h.congestion.InSlowStart() {
 		t.Fatal("migration lost BBR policy or old MTU/window survived")
 	}
 }

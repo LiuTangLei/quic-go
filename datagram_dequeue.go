@@ -3,6 +3,7 @@ package quic
 import (
 	"github.com/quic-go/quic-go/internal/ackhandler"
 	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/qlog"
 )
 
 // appendDatagrams drains only the ready FIFO prefix that fits this packet.
@@ -11,6 +12,7 @@ import (
 func (h *datagramQueue) appendDatagrams(pl payload, maxPayloadSize protocol.ByteCount, limit int, v protocol.Version) payload {
 	h.sendMx.Lock()
 	removed := false
+	var dropped []int
 	for range min(limit, maxDatagramSendQueueLen) {
 		if h.sendQueue.Empty() {
 			break
@@ -22,6 +24,9 @@ func (h *datagramQueue) appendDatagrams(pl payload, maxPayloadSize protocol.Byte
 				// Preserve the existing unreliable path-MTU drop policy only
 				// when the frame cannot fit an otherwise empty packet.
 				h.sendQueue.PopFront()
+				if h.qlogger != nil {
+					dropped = append(dropped, len(f.Data))
+				}
 				removed = true
 				continue
 			}
@@ -40,6 +45,9 @@ func (h *datagramQueue) appendDatagrams(pl payload, maxPayloadSize protocol.Byte
 		case h.sent <- struct{}{}:
 		default:
 		}
+	}
+	for _, size := range dropped {
+		h.qlogger.RecordEvent(qlog.DatagramDropped{Direction: qlog.DirectionSending, Raw: qlog.RawInfo{Length: size}, Trigger: "too_large"})
 	}
 	return pl
 }

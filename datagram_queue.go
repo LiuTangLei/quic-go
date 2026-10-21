@@ -7,6 +7,8 @@ import (
 	"github.com/quic-go/quic-go/internal/utils"
 	"github.com/quic-go/quic-go/internal/utils/ringbuffer"
 	"github.com/quic-go/quic-go/internal/wire"
+	"github.com/quic-go/quic-go/qlog"
+	"github.com/quic-go/quic-go/qlogwriter"
 	"sync"
 )
 
@@ -29,15 +31,24 @@ type datagramQueue struct {
 	closeErr                   error
 	closed                     chan struct{}
 	hasData                    func()
+	qlogger                    qlogwriter.Recorder
 	logger                     utils.Logger
 }
 
-func newDatagramQueue(hasData func(), logger utils.Logger) *datagramQueue {
-	return &datagramQueue{hasData: hasData, rcvd: make(chan struct{}, 1), sent: make(chan struct{}, 1), closed: make(chan struct{}), logger: logger}
+func newDatagramQueue(hasData func(), logger utils.Logger, qlogger qlogwriter.Recorder) *datagramQueue {
+	return &datagramQueue{hasData: hasData, rcvd: make(chan struct{}, 1), sent: make(chan struct{}, 1), closed: make(chan struct{}), logger: logger, qlogger: qlogger}
 }
 func (h *datagramQueue) Add(f *wire.DatagramFrame) error {
 	h.sendMx.Lock()
 	for {
+		// don't queue frames after the connection is closed
+		select {
+		case <-h.closed:
+			h.sendMx.Unlock()
+			return h.closeErr
+		default:
+		}
+
 		if h.sendQueue.Len() < maxDatagramSendQueueLen {
 			h.sendQueue.PushBack(f)
 			h.sendMx.Unlock()
@@ -49,6 +60,7 @@ func (h *datagramQueue) Add(f *wire.DatagramFrame) error {
 		default:
 		}
 		h.sendMx.Unlock()
+		// The queue is full. Wait until a frame is dequeued.
 		select {
 		case <-h.closed:
 			return h.closeErr
@@ -82,6 +94,9 @@ func (h *datagramQueue) HandleDatagramFrame(f *wire.DatagramFrame) {
 		if h.logger.Debug() {
 			h.logger.Debugf("Discarding received DATAGRAM frame (%d bytes payload)", len(f.Data))
 		}
+		if h.qlogger != nil {
+			h.qlogger.RecordEvent(qlog.DatagramDropped{Direction: qlog.DirectionReceiving, Raw: qlog.RawInfo{Length: len(f.Data)}, Trigger: "buffer_full"})
+		}
 		return
 	}
 	data := make([]byte, len(f.Data))
@@ -99,6 +114,9 @@ func (h *datagramQueue) HandleDatagramFrame(f *wire.DatagramFrame) {
 	h.rcvMx.Unlock()
 }
 func (h *datagramQueue) Receive(ctx context.Context) ([]byte, error) {
+	if err := context.Cause(ctx); err != nil {
+		return nil, err
+	}
 	for {
 		h.rcvMx.Lock()
 		if h.rcvSize > 0 {
@@ -117,7 +135,7 @@ func (h *datagramQueue) Receive(ctx context.Context) ([]byte, error) {
 		case <-h.closed:
 			return nil, h.closeErr
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, context.Cause(ctx)
 		}
 	}
 }

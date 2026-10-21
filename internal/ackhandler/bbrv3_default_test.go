@@ -15,7 +15,7 @@ func TestDefaultBBRv3SurvivesMigrationAndLegacySelectors(t *testing.T) {
 		check := func(size int) {
 			t.Helper()
 			named, ok := h.congestion.(interface{ ControllerName() string })
-			if !ok || named.ControllerName() != "bbr-v3" || !h.useBBR || !h.useBBRv3 {
+			if !ok || named.ControllerName() != "bbr-v3" {
 				t.Fatalf("wrong production controller for flags %v", flags)
 			}
 			if h.ecnTracker != nil || h.enableECN {

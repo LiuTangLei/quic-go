@@ -57,7 +57,7 @@ func TestBBRTunnelPacketSizeAndPacingGain(t *testing.T) {
 		t.Fatal("PMTU increase not applied")
 	}
 	b.pacingRate = Bandwidth(80_000_000)
-	if b.pacer.adjustedBandwidth() != 10_000_000 {
+	if b.pacer.timeScaledBandwidth(100*time.Microsecond, b.pacingRate) != 1000 {
 		t.Fatal("BBR pacing gain was multiplied again")
 	}
 	if b.CanSend(b.GetCongestionWindow()) {

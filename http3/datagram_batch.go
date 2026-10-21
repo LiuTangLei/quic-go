@@ -1,6 +1,7 @@
 package http3
 
 import (
+	"context"
 	"errors"
 
 	"github.com/quic-go/quic-go"
@@ -23,10 +24,7 @@ func (s *RequestStream) SendDatagramsWithPrefix(prefix []byte, packets [][]byte)
 	return s.str.SendDatagramsWithPrefix(prefix, packets)
 }
 func (s *stateTrackingStream) SendDatagramsWithPrefix(prefix []byte, packets [][]byte) (int, error) {
-	s.mx.Lock()
-	err := s.sendErr
-	s.mx.Unlock()
-	if err != nil {
+	if err := context.Cause(s.Context()); err != nil {
 		return 0, err
 	}
 	if s.sendDatagramBatch == nil {
