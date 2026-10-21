@@ -656,27 +656,7 @@ func (p *packetPacker) composeNextPacket(
 			// Preserve the existing space available to reliable/control data.
 			limit = 1
 		}
-		for range limit {
-			f := p.datagramQueue.Peek()
-			if f == nil {
-				break
-			}
-			size := f.Length(v)
-			if size > maxPayloadSize-pl.length {
-				if pl.ack == nil && len(pl.frames) == 0 {
-					// Keep the existing unreliable path-MTU drop policy for
-					// a frame that cannot fit an otherwise empty packet.
-					p.datagramQueue.Pop()
-					continue
-				}
-				// Earlier DATAGRAMs or an ACK used the remaining room. This
-				// frame may fit the next packet, so leave it queued.
-				break
-			}
-			pl.frames = append(pl.frames, ackhandler.Frame{Frame: f})
-			pl.length += size
-			p.datagramQueue.Pop()
-		}
+		pl = p.datagramQueue.appendDatagrams(pl, maxPayloadSize, limit, v)
 	}
 
 	if pl.ack != nil && !hasData && !hasRetransmission {
