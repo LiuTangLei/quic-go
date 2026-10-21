@@ -651,19 +651,31 @@ func (p *packetPacker) composeNextPacket(
 	}
 
 	if p.datagramQueue != nil {
-		if f := p.datagramQueue.Peek(); f != nil {
-			size := f.Length(v)
-			if size <= maxPayloadSize-pl.length { // DATAGRAM frame fits
-				pl.frames = append(pl.frames, ackhandler.Frame{Frame: f})
-				pl.length += size
-				p.datagramQueue.Pop()
-			} else if pl.ack == nil {
-				// The DATAGRAM frame doesn't fit, and the packet doesn't contain an ACK.
-				// Discard this frame. There's no point in retrying this in the next packet,
-				// as it's unlikely that the available packet size will increase.
-				p.datagramQueue.Pop()
+		limit := maxDatagramSendQueueLen
+		if hasData || hasRetransmission {
+			// Preserve the existing space available to reliable/control data.
+			limit = 1
+		}
+		for range limit {
+			f := p.datagramQueue.Peek()
+			if f == nil {
+				break
 			}
-			// If the DATAGRAM frame was too large and the packet contained an ACK, we'll try to send it out later.
+			size := f.Length(v)
+			if size > maxPayloadSize-pl.length {
+				if pl.ack == nil && len(pl.frames) == 0 {
+					// Keep the existing unreliable path-MTU drop policy for
+					// a frame that cannot fit an otherwise empty packet.
+					p.datagramQueue.Pop()
+					continue
+				}
+				// Earlier DATAGRAMs or an ACK used the remaining room. This
+				// frame may fit the next packet, so leave it queued.
+				break
+			}
+			pl.frames = append(pl.frames, ackhandler.Frame{Frame: f})
+			pl.length += size
+			p.datagramQueue.Pop()
 		}
 	}
 
@@ -965,7 +977,21 @@ func (p *packetPacker) appendPacketPayload(raw []byte, pl payload, paddingLen pr
 	// Randomize the order of the control frames.
 	// This makes sure that the receiver doesn't rely on the order in which frames are packed.
 	if len(pl.frames) > 1 {
-		p.rand.Shuffle(len(pl.frames), func(i, j int) { pl.frames[i], pl.frames[j] = pl.frames[j], pl.frames[i] })
+		datagrams := 0
+		for _, f := range pl.frames {
+			if _, ok := f.Frame.(*wire.DatagramFrame); ok {
+				datagrams++
+				if datagrams == 2 {
+					break
+				}
+			}
+		}
+		// Batching must not turn ready FIFO IP packets into artificial UDP
+		// reordering. Reliable/control work retains its existing randomization
+		// (and only admits one DATAGRAM above).
+		if datagrams < 2 {
+			p.rand.Shuffle(len(pl.frames), func(i, j int) { pl.frames[i], pl.frames[j] = pl.frames[j], pl.frames[i] })
+		}
 	}
 	for _, f := range pl.frames {
 		var err error

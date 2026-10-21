@@ -23,11 +23,12 @@ func (c *Conn) SendDatagramsWithPrefix(prefix []byte, payloads [][]byte) (int, e
 	if len(payloads) > 128 {
 		return 0, errors.New("datagram batch exceeds 128 packets")
 	}
-	if !c.supportsDatagrams() {
+	params := c.appliedPeerParams.Load()
+	if params == nil || params.MaxDatagramFrameSize <= 0 {
 		return 0, errors.New("datagram support disabled")
 	}
 	f := wire.DatagramFrame{DataLenPresent: true}
-	limit := min(f.MaxDataLen(c.peerParams.MaxDatagramFrameSize, c.version), protocol.ByteCount(c.maxPayloadSizeEstimate.Load()))
+	limit := min(f.MaxDataLen(params.MaxDatagramFrameSize, c.version), protocol.ByteCount(c.maxPayloadSizeEstimate.Load()))
 	for _, p := range payloads {
 		if protocol.ByteCount(len(prefix)) > limit || protocol.ByteCount(len(p)) > limit-protocol.ByteCount(len(prefix)) {
 			return 0, &DatagramTooLargeError{MaxDatagramPayloadSize: int64(limit)}
