@@ -28,7 +28,12 @@ func newReceivedPacketTracker() *receivedPacketTracker {
 }
 
 func (h *receivedPacketTracker) ReceivedPacket(pn protocol.PacketNumber, ecn protocol.ECN, ackEliciting bool) error {
-	if isNew := h.packetHistory.ReceivedPacket(pn); !isNew {
+	late := pn < h.packetHistory.deletedBelow
+	if late {
+		if !h.packetHistory.ReceivedLatePacket(pn) {
+			return fmt.Errorf("receivedPacketTracker BUG: ReceivedPacket called for old / duplicate packet %d", pn)
+		}
+	} else if isNew := h.packetHistory.ReceivedPacket(pn); !isNew {
 		return fmt.Errorf("receivedPacketTracker BUG: ReceivedPacket called for old / duplicate packet %d", pn)
 	}
 
@@ -41,7 +46,7 @@ func (h *receivedPacketTracker) ReceivedPacket(pn protocol.PacketNumber, ecn pro
 	case protocol.ECNCE:
 		h.ecnce++
 	}
-	if !ackEliciting {
+	if !ackEliciting || late {
 		return nil
 	}
 	h.hasNewAck = true
@@ -110,6 +115,9 @@ func newAppDataReceivedPacketTracker(logger utils.Logger) *appDataReceivedPacket
 func (h *appDataReceivedPacketTracker) ReceivedPacket(pn protocol.PacketNumber, ecn protocol.ECN, rcvTime monotime.Time, ackEliciting bool) error {
 	if err := h.receivedPacketTracker.ReceivedPacket(pn, ecn, ackEliciting); err != nil {
 		return err
+	}
+	if pn < h.ignoreBelow {
+		return nil // late packet: processed, but it cannot be acknowledged anymore
 	}
 	if pn >= h.largestObserved {
 		h.largestObserved = pn

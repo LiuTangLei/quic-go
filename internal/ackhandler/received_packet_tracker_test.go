@@ -161,8 +161,8 @@ func TestAppDataReceivedPacketTrackerIgnoreBelow(t *testing.T) {
 	tr := newAppDataReceivedPacketTracker(utils.DefaultLogger)
 
 	tr.IgnoreBelow(4)
-	// check that packets below 7 are considered duplicates
-	require.True(t, tr.IsPotentiallyDuplicate(3))
+	// The ACK floor alone does not make an unseen packet a duplicate.
+	require.False(t, tr.IsPotentiallyDuplicate(3))
 	require.False(t, tr.IsPotentiallyDuplicate(4))
 
 	for i := 5; i <= 10; i++ {
@@ -180,9 +180,37 @@ func TestAppDataReceivedPacketTrackerIgnoreBelow(t *testing.T) {
 	require.NotNil(t, ack)
 	require.Equal(t, []wire.AckRange{{Smallest: 7, Largest: 12}}, ack.AckRanges)
 
-	// make sure that old packets are not accepted
+	// A late, never-seen packet below the floor is processed once but not
+	// re-added to the ACK ranges and does not queue an ACK.
+	require.False(t, tr.IsPotentiallyDuplicate(4))
+	require.NoError(t, tr.ReceivedPacket(4, protocol.ECNNon, monotime.Now(), true))
+	require.True(t, tr.IsPotentiallyDuplicate(4))
+	require.Nil(t, tr.GetAckFrame(monotime.Now(), false))
+	require.NoError(t, tr.ReceivedPacket(13, protocol.ECNNon, monotime.Now(), true))
+	ack = tr.GetAckFrame(monotime.Now(), false)
+	require.NotNil(t, ack)
+	require.Equal(t, []wire.AckRange{{Smallest: 7, Largest: 13}}, ack.AckRanges)
+
+	// duplicates below the floor are still rejected
+	require.True(t, tr.IsPotentiallyDuplicate(5))
 	require.ErrorContains(t,
 		tr.ReceivedPacket(4, protocol.ECNNon, monotime.Now(), true),
 		"receivedPacketTracker BUG: ReceivedPacket called for old / duplicate packet 4",
 	)
+}
+
+func TestAppDataReceivedPacketTrackerReplayWindow(t *testing.T) {
+	tr := newAppDataReceivedPacketTracker(utils.DefaultLogger)
+	now := monotime.Now()
+	require.NoError(t, tr.ReceivedPacket(10, protocol.ECNNon, now, true))
+	require.NoError(t, tr.ReceivedPacket(replayWindowSize+20, protocol.ECNNon, now, true))
+	tr.IgnoreBelow(replayWindowSize + 20)
+	// inside the window: unseen packets are accepted once
+	require.False(t, tr.IsPotentiallyDuplicate(25))
+	require.NoError(t, tr.ReceivedPacket(25, protocol.ECNNon, now, true))
+	require.True(t, tr.IsPotentiallyDuplicate(25))
+	// older than the window: conservatively treated as duplicates
+	require.True(t, tr.IsPotentiallyDuplicate(20))
+	require.True(t, tr.IsPotentiallyDuplicate(10))
+	require.Error(t, tr.ReceivedPacket(20, protocol.ECNNon, now, true))
 }

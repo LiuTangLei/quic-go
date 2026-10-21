@@ -20,11 +20,14 @@ type receivedPacketHistory struct {
 	ranges []interval // maximum length: protocol.MaxNumAckRanges
 
 	deletedBelow protocol.PacketNumber
+
+	replay replayWindow // exact duplicate detection, independent of ACK pruning
 }
 
 func newReceivedPacketHistory() *receivedPacketHistory {
 	return &receivedPacketHistory{
 		deletedBelow: protocol.InvalidPacketNumber,
+		replay:       replayWindow{highest: protocol.InvalidPacketNumber},
 	}
 }
 
@@ -35,6 +38,7 @@ func (h *receivedPacketHistory) ReceivedPacket(p protocol.PacketNumber) bool /* 
 		return false
 	}
 
+	h.replay.mark(p)
 	isNew := h.addToRanges(p)
 	// Delete old ranges, if we're tracking too many of them.
 	// This is a DoS defense against a peer that sends us too many gaps.
@@ -143,17 +147,12 @@ func (h *receivedPacketHistory) HighestMissingUpTo(p protocol.PacketNumber) prot
 }
 
 func (h *receivedPacketHistory) IsPotentiallyDuplicate(p protocol.PacketNumber) bool {
-	if p < h.deletedBelow {
-		return true
-	}
-	// Iterating over the slices is faster than using a binary search (using slices.BinarySearchFunc).
-	for i := len(h.ranges) - 1; i >= 0; i-- {
-		if p > h.ranges[i].End {
-			return false
-		}
-		if p <= h.ranges[i].End && p >= h.ranges[i].Start {
-			return true
-		}
-	}
-	return false
+	return h.replay.seen(p)
+}
+
+// ReceivedLatePacket records a packet below the ACK floor that passed exact
+// duplicate detection. It is processed but never re-added to the ACK ranges:
+// the peer already received an ACK covering a larger packet number.
+func (h *receivedPacketHistory) ReceivedLatePacket(p protocol.PacketNumber) bool {
+	return p < h.deletedBelow && h.replay.mark(p)
 }

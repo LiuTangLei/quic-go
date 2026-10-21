@@ -168,12 +168,47 @@ func TestReceivedPacketHistoryDuplicateDetection(t *testing.T) {
 	require.True(t, hist.IsPotentiallyDuplicate(9))
 	require.False(t, hist.IsPotentiallyDuplicate(10))
 
-	// delete and check for potential duplicates
+	// Pruning ACK ranges must not turn unseen packets into duplicates:
+	// a late packet 7 is still new, while seen packets remain duplicates.
 	hist.DeleteBelow(8)
-	require.True(t, hist.IsPotentiallyDuplicate(7))
+	require.True(t, hist.IsPotentiallyDuplicate(4))
+	require.False(t, hist.IsPotentiallyDuplicate(7))
 	require.True(t, hist.IsPotentiallyDuplicate(8))
 	require.True(t, hist.IsPotentiallyDuplicate(9))
 	require.False(t, hist.IsPotentiallyDuplicate(10))
+	require.False(t, hist.ReceivedPacket(7)) // not re-added to the ACK ranges
+	require.True(t, hist.ReceivedLatePacket(7))
+	require.False(t, hist.ReceivedLatePacket(7))
+	require.True(t, hist.IsPotentiallyDuplicate(7))
+	require.Equal(t, []interval{{Start: 8, End: 9}}, slices.Collect(hist.Backward()))
+}
+
+func TestReceivedPacketHistoryDuplicatesSurviveRangeLimit(t *testing.T) {
+	hist := newReceivedPacketHistory()
+	// every other packet creates a new range; old ranges are pruned
+	for p := protocol.PacketNumber(0); p < 4*protocol.MaxNumAckRanges; p += 2 {
+		require.True(t, hist.ReceivedPacket(p))
+	}
+	require.Len(t, slices.Collect(hist.Backward()), protocol.MaxNumAckRanges)
+	require.True(t, hist.IsPotentiallyDuplicate(0))
+	require.False(t, hist.IsPotentiallyDuplicate(1))
+}
+
+func TestReplayWindowAdvance(t *testing.T) {
+	w := replayWindow{highest: protocol.InvalidPacketNumber}
+	require.True(t, w.mark(0))
+	require.False(t, w.mark(0))
+	for _, jump := range []protocol.PacketNumber{1, 63, 64, 65, 200, replayWindowSize - 1, replayWindowSize, 3*replayWindowSize + 7} {
+		start := w.highest
+		p := start + jump
+		require.True(t, w.mark(p))
+		// all slots between the old and new highest were cleared
+		for q := max(start+1, p-replayWindowSize+1); q < p; q++ {
+			require.Falsef(t, w.seen(q), "jump %d: %d", jump, q)
+		}
+		require.True(t, w.seen(p))
+		require.True(t, w.seen(p-replayWindowSize))
+	}
 }
 
 func TestReceivedPacketHistoryRandomized(t *testing.T) {
