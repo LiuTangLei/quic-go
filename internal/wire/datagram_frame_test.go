@@ -124,3 +124,24 @@ func TestMaxDatagramLenWithDataLenPresent(t *testing.T) {
 	}
 	require.Equal(t, 1, frameOneByteTooSmallCounter)
 }
+
+func TestBorrowedDatagramPayloadHasExactBoundary(t *testing.T) {
+	p := NewFrameParser(true, false, false)
+	raw := []byte{3, 7, 8, 9, 0x01} // payload length, payload, following PING
+	f, n, err := p.ParseDatagramFrame(0x31, raw, protocol.Version1)
+	require.NoError(t, err)
+	require.Equal(t, 4, n)
+	require.Equal(t, []byte{7, 8, 9}, f.Data)
+	require.Equal(t, len(f.Data), cap(f.Data))
+	require.Equal(t, &raw[1], &f.Data[0])
+	appended := append(f.Data, 42)
+	require.Equal(t, byte(42), appended[3])
+	require.Equal(t, byte(0x01), raw[4])
+	raw[1] = 6
+	require.Equal(t, byte(6), f.Data[0])
+	// Standalone parsing retains its original owned-buffer contract.
+	owned, _, err := parseDatagramFrame(raw, 0x31, protocol.Version1)
+	require.NoError(t, err)
+	clear(raw)
+	require.Equal(t, []byte{6, 8, 9}, owned.Data)
+}

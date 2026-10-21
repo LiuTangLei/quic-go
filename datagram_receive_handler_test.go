@@ -94,3 +94,44 @@ func TestDatagramReceiveHandlerConcurrentReplacement(t *testing.T) {
 	}
 	workers.Wait()
 }
+
+func TestParsedDatagramDoesNotOutliveBorrowedPacket(t *testing.T) {
+	for _, dispatch := range []string{"queue", "fallthrough", "handler"} {
+		t.Run(dispatch, func(t *testing.T) {
+			c := receiveHandlerTestConn()
+			var taken []byte
+			if dispatch != "queue" {
+				if err := c.SetDatagramReceiveHandler(func(b []byte) bool {
+					if dispatch == "handler" {
+						taken = bytes.Clone(b)
+						return true
+					}
+					return false
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			raw := []byte{3, 7, 8, 9, 0x01}
+			parser := wire.NewFrameParser(true, false, false)
+			f, n, err := parser.ParseDatagramFrame(0x31, raw, c.version)
+			if err != nil || n != 4 {
+				t.Fatal(n, err)
+			}
+			if err := c.handleDatagramFrame(f); err != nil {
+				t.Fatal(err)
+			}
+			clear(raw) // decrypted packet can be recycled immediately after dispatch
+			if dispatch != "handler" {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				taken, err = c.datagramQueue.Receive(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !bytes.Equal(taken, []byte{7, 8, 9}) {
+				t.Fatalf("retained packet storage: %v", taken)
+			}
+		})
+	}
+}

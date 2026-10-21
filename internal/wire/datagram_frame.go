@@ -19,7 +19,21 @@ type DatagramFrame struct {
 	Data           []byte
 }
 
-func parseDatagramFrame(b []byte, typ FrameType, _ protocol.Version) (*DatagramFrame, int, error) {
+func parseDatagramFrame(b []byte, typ FrameType, v protocol.Version) (*DatagramFrame, int, error) {
+	f, n, err := parseDatagramFrameBorrowed(b, typ, v)
+	if err != nil {
+		return nil, n, err
+	}
+	// Preserve ownership for callers that retain a standalone parsed frame.
+	data := make([]byte, len(f.Data))
+	copy(data, f.Data)
+	f.Data = data
+	return f, n, nil
+}
+
+// parseDatagramFrameBorrowed is used by the synchronous connection receive
+// loop. The decrypted packet owns the bytes until frame handling returns.
+func parseDatagramFrameBorrowed(b []byte, typ FrameType, _ protocol.Version) (*DatagramFrame, int, error) {
 	startLen := len(b)
 	f := &DatagramFrame{}
 	f.DataLenPresent = uint64(typ)&0x1 > 0
@@ -39,8 +53,7 @@ func parseDatagramFrame(b []byte, typ FrameType, _ protocol.Version) (*DatagramF
 	} else {
 		length = uint64(len(b))
 	}
-	f.Data = make([]byte, length)
-	copy(f.Data, b)
+	f.Data = b[:length:length]
 	return f, startLen - len(b) + int(length), nil
 }
 

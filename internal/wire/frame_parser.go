@@ -105,8 +105,11 @@ func (p *FrameParser) ParseAckFrame(frameType FrameType, data []byte, encLevel p
 	return p.ackFrame, l, nil
 }
 
+// ParseDatagramFrame borrows its payload from data. The connection handles it
+// before releasing the decrypted packet: a synchronous handler borrows it only
+// during its call, while the asynchronous DATAGRAM queue makes its own copy.
 func (p *FrameParser) ParseDatagramFrame(frameType FrameType, data []byte, v protocol.Version) (*DatagramFrame, int, error) {
-	f, l, err := parseDatagramFrame(data, frameType, v)
+	f, l, err := parseDatagramFrameBorrowed(data, frameType, v)
 	if err != nil {
 		return nil, 0, &qerr.TransportError{
 			ErrorCode:    qerr.FrameEncodingError,
