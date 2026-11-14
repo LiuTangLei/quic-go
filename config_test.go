@@ -111,6 +111,8 @@ func configWithNonZeroNonFunctionFields(t *testing.T) *Config {
 			f.Set(reflect.ValueOf(8))
 		case "ConnectionIDGenerator":
 			f.Set(reflect.ValueOf(&protocol.DefaultConnectionIDGenerator{ConnLen: protocol.DefaultConnectionIDLength}))
+		case "InitialPathReady":
+			f.Set(reflect.ValueOf((<-chan struct{})(make(chan struct{}))))
 		case "HandshakeIdleTimeout":
 			f.Set(reflect.ValueOf(time.Second))
 		case "MaxIdleTimeout":
@@ -151,6 +153,8 @@ func configWithNonZeroNonFunctionFields(t *testing.T) *Config {
 			f.Set(reflect.ValueOf(true))
 		case "EnableStreamResetPartialDelivery":
 			f.Set(reflect.ValueOf(true))
+		case "PacketSizeTarget":
+			f.Set(reflect.ValueOf(uint16(1400)))
 		default:
 			t.Fatalf("all fields must be accounted for, but saw unknown field %q", fn)
 		}

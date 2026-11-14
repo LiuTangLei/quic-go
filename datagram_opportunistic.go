@@ -21,8 +21,7 @@ func (c *Conn) TrySendDatagramsWithPrefix(prefix []byte, payloads [][]byte) (boo
 	if len(payloads) == 0 || len(payloads) > 2 {
 		return false, errors.New("opportunistic datagram batch must contain one or two frames")
 	}
-	f := wire.DatagramFrame{DataLenPresent: true}
-	limit := min(f.MaxDataLen(params.MaxDatagramFrameSize, c.version), protocol.ByteCount(c.maxPayloadSizeEstimate.Load()))
+	limit := c.maxDatagramDataLen(params)
 	for _, p := range payloads {
 		if protocol.ByteCount(len(prefix)) > limit || protocol.ByteCount(len(p)) > limit-protocol.ByteCount(len(prefix)) {
 			return false, &DatagramTooLargeError{MaxDatagramPayloadSize: int64(limit)}

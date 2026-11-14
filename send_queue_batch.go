@@ -16,6 +16,7 @@ func (h *sendQueue) writeReadyBatch(entries []queueEntry) error {
 		e := entries[i]
 		if e.gsoSize != 0 || e.ecn != protocol.ECNUnsupported {
 			if err := h.conn.Write(e.buf.Data, e.gsoSize, e.ecn); err != nil {
+				h.reportWriteError(err, len(e.buf.Data), e.gsoSize)
 				return err
 			}
 			i++
@@ -33,6 +34,11 @@ func (h *sendQueue) writeReadyBatch(entries []queueEntry) error {
 			err = h.batchWrite(data[:n])
 		}
 		if err != nil {
+			largest := 0
+			for _, b := range data[:n] {
+				largest = max(largest, len(b))
+			}
+			h.reportWriteError(err, largest, 0)
 			return err
 		}
 		i += n

@@ -27,8 +27,7 @@ func (c *Conn) SendDatagramsWithPrefix(prefix []byte, payloads [][]byte) (int, e
 	if params == nil || params.MaxDatagramFrameSize <= 0 {
 		return 0, errors.New("datagram support disabled")
 	}
-	f := wire.DatagramFrame{DataLenPresent: true}
-	limit := min(f.MaxDataLen(params.MaxDatagramFrameSize, c.version), protocol.ByteCount(c.maxPayloadSizeEstimate.Load()))
+	limit := c.maxDatagramDataLen(params)
 	for _, p := range payloads {
 		if protocol.ByteCount(len(prefix)) > limit || protocol.ByteCount(len(p)) > limit-protocol.ByteCount(len(prefix)) {
 			return 0, &DatagramTooLargeError{MaxDatagramPayloadSize: int64(limit)}
@@ -102,10 +101,8 @@ func (h *datagramQueue) addBatch(frames []*wire.DatagramFrame) (int, error) {
 		default:
 		}
 		h.sendMx.Unlock()
-		select {
-		case <-h.closed:
-			return n, h.closeErr
-		case <-h.sent:
+		if err := h.waitForSendSpace(true); err != nil {
+			return n, err
 		}
 		h.sendMx.Lock()
 	}

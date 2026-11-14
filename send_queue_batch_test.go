@@ -20,7 +20,7 @@ func TestSendQueueNegotiatedCapacity(t *testing.T) {
 	for _, size := range []int{-1, 0, 1, 8, 16, 32, 33, 1024} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			c := &sizedBatchTestConn{batchTestConn: &batchTestConn{}, size: size}
-			q := newSendQueue(c).(*sendQueue)
+			q := newSendQueue(c)
 			want := sendQueueCapacity
 			if size >= 8 && size <= 32 {
 				want = size
@@ -81,7 +81,7 @@ func (c *batchTestConn) batchWriter() func([][]byte) error {
 func TestSendQueueReadyBatch(t *testing.T) {
 	for _, count := range []int{1, sendQueueCapacity} {
 		c := &batchTestConn{}
-		q := newSendQueue(c).(*sendQueue)
+		q := newSendQueue(c)
 		for i := 0; i < count; i++ {
 			b := getPacketBuffer()
 			b.Data = append(b.Data[:0], byte(i), byte(i+1))
@@ -111,7 +111,7 @@ func TestSendQueueReadyBatch(t *testing.T) {
 func TestSendQueueBatchWriteError(t *testing.T) {
 	want := errors.New("batch write failed")
 	c := &batchTestConn{failure: want}
-	q := newSendQueue(c).(*sendQueue)
+	q := newSendQueue(c)
 	for i := 0; i < 2; i++ {
 		b := getPacketBuffer()
 		b.Data = append(b.Data[:0], byte(i))
@@ -127,7 +127,7 @@ func TestSendQueueBatchWriteError(t *testing.T) {
 
 func TestSendQueueBatchKeepsOOBWritesSeparate(t *testing.T) {
 	c := &batchTestConn{}
-	q := newSendQueue(c).(*sendQueue)
+	q := newSendQueue(c)
 	for i := 0; i < 3; i++ {
 		b := getPacketBuffer()
 		b.Data = append(b.Data[:0], byte(i))

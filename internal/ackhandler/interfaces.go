@@ -33,6 +33,7 @@ type SentPacketHandler interface {
 	PopPacketNumber(protocol.PacketNumberSpace) protocol.PacketNumber
 
 	GetLossDetectionTimeout() monotime.Time
+	TakeLostDataPacketSize() protocol.ByteCount
 	OnLossDetectionTimeout(now monotime.Time) error
 
 	MigratedPath(now monotime.Time, initialMaxPacketSize protocol.ByteCount)

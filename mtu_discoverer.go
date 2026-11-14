@@ -1,6 +1,8 @@
 package quic
 
 import (
+	"time"
+
 	"github.com/quic-go/quic-go/internal/ackhandler"
 	"github.com/quic-go/quic-go/internal/monotime"
 	"github.com/quic-go/quic-go/internal/protocol"
@@ -20,6 +22,12 @@ const (
 	// MTU discovery won't probe for larger MTUs than this size.
 	// The algorithm used here is resilient to packet loss of (maxLostMTUProbes - 1) packets.
 	maxLostMTUProbes = 3
+	// In target mode, a size that the path did not carry is tried again at
+	// this interval: the path under a connection can change without notice.
+	mtuTargetRetryInterval = time.Minute
+	// In target mode, a size in use is confirmed again at this interval.
+	// Without DF nothing else reveals a path that stopped carrying it.
+	mtuTargetValidateInterval = 20 * time.Second
 )
 
 // The Path MTU is found by sending a larger packet every now and then.
@@ -94,7 +102,44 @@ type mtuFinder struct {
 	// We're therefore not concerned about overflows of this counter.
 	generation uint8
 
-	qlogger qlogwriter.Recorder
+	// Target mode (Config.PacketSizeTarget): instead of searching, probe one
+	// size, use it once acknowledged, keep confirming it, and return to base
+	// when maxLostMTUProbes consecutive probes of it are lost. target is zero
+	// when searching.
+	base, target protocol.ByteCount
+	targetLost   int  // consecutive lost probes of target
+	reverted     bool // min returned to base since the last takeReverted
+
+	confirmUrgent, baseFeedbackSent bool
+	qlogger                         qlogwriter.Recorder
+}
+
+// probeOnly switches to target mode, starting from the current size.
+func (f *mtuFinder) probeOnly(target protocol.ByteCount) {
+	f.base, f.target, f.targetLost = f.min, target, 0
+}
+
+// targetDelay is the time between two probes in target mode.
+func (f *mtuFinder) targetDelay() time.Duration {
+	quick := mtuProbeDelay * f.rttStats.SmoothedRTT()
+	switch {
+	case f.min < f.target && f.targetLost >= maxLostMTUProbes:
+		return max(quick, mtuTargetRetryInterval)
+	case f.confirmUrgent:
+		return quick
+	case f.min >= f.target && f.targetLost == 0:
+		return max(quick, mtuTargetValidateInterval)
+	default:
+		// Trying a new size, or re-checking one whose last probe was lost.
+		return quick
+	}
+}
+
+// takeReverted reports, once, that the size in use was withdrawn.
+func (f *mtuFinder) takeReverted() bool {
+	reverted := f.reverted
+	f.reverted = false
+	return reverted
 }
 
 func newMTUDiscoverer(
@@ -123,6 +168,9 @@ func (f *mtuFinder) init(start, max protocol.ByteCount) {
 }
 
 func (f *mtuFinder) done() bool {
+	if f.target != 0 {
+		return f.min >= f.target
+	}
 	return f.max()-f.min <= maxMTUDiff+1
 }
 
@@ -143,6 +191,9 @@ func (f *mtuFinder) ShouldSendProbe(now monotime.Time) bool {
 	if f.lastProbeTime.IsZero() {
 		return false
 	}
+	if f.target != 0 {
+		return f.inFlight == protocol.InvalidByteCount && !now.Before(f.lastProbeTime.Add(f.targetDelay()))
+	}
 	if f.inFlight != protocol.InvalidByteCount || f.done() {
 		return false
 	}
@@ -151,13 +202,16 @@ func (f *mtuFinder) ShouldSendProbe(now monotime.Time) bool {
 
 func (f *mtuFinder) GetPing(now monotime.Time) (ackhandler.Frame, protocol.ByteCount) {
 	var size protocol.ByteCount
-	if f.lastProbeWasLost {
+	if f.target != 0 {
+		size = f.target
+	} else if f.lastProbeWasLost {
 		size = (f.min + f.lost[0]) / 2
 	} else {
 		size = (f.min + f.max()) / 2
 	}
 	f.lastProbeTime = now
 	f.inFlight = size
+	f.baseFeedbackSent = false
 	return ackhandler.Frame{
 		Frame:   &wire.PingFrame{},
 		Handler: &mtuFinderAckHandler{mtuFinder: f, generation: f.generation},
@@ -173,6 +227,8 @@ func (f *mtuFinder) Reset(start, max protocol.ByteCount) {
 	f.lastProbeTime = 0
 	f.lastProbeWasLost = false
 	f.inFlight = protocol.InvalidByteCount
+	f.base, f.target, f.targetLost, f.reverted = 0, 0, 0, false
+	f.confirmUrgent, f.baseFeedbackSent = false, false
 	f.init(start, max)
 }
 
@@ -193,6 +249,15 @@ func (h *mtuFinderAckHandler) OnAcked(wire.Frame) {
 		panic("OnAcked callback called although there's no MTU probe packet in flight")
 	}
 	h.inFlight = protocol.InvalidByteCount
+	if h.target != 0 {
+		grew := h.min < size
+		h.min, h.targetLost = size, 0
+		h.confirmUrgent = false
+		if grew && h.qlogger != nil {
+			h.qlogger.RecordEvent(qlog.MTUUpdated{Value: int(size), Done: true})
+		}
+		return
+	}
 	h.min = size
 	h.lastProbeWasLost = false
 	// remove all values smaller than size from the lost array
@@ -229,8 +294,20 @@ func (h *mtuFinderAckHandler) OnLost(wire.Frame) {
 	if size == protocol.InvalidByteCount {
 		panic("OnLost callback called although there's no MTU probe packet in flight")
 	}
-	h.lastProbeWasLost = true
 	h.inFlight = protocol.InvalidByteCount
+	if h.target != 0 {
+		h.targetLost++
+		if h.min >= h.target && h.targetLost >= maxLostMTUProbes {
+			// The path no longer carries the size in use.
+			h.min, h.reverted = h.base, true
+			h.confirmUrgent = false
+			if h.qlogger != nil {
+				h.qlogger.RecordEvent(qlog.MTUUpdated{Value: int(h.base)})
+			}
+		}
+		return
+	}
+	h.lastProbeWasLost = true
 	for i, v := range h.lost {
 		if size < v {
 			copy(h.lost[i+1:], h.lost[i:])
@@ -238,4 +315,43 @@ func (h *mtuFinderAckHandler) OnLost(wire.Frame) {
 			break
 		}
 	}
+}
+
+// A successful target probe can become obsolete when the local route MTU
+// shrinks. Invalidate its callbacks before withdrawing: a late ACK for the
+// former path must not raise the size again or touch a different probe.
+func (f *mtuFinder) withdrawAfterWriteError(size protocol.ByteCount, now monotime.Time) bool {
+	if f.target == 0 || f.min <= f.base || size <= f.base {
+		return false
+	}
+	base, target, maximum := f.base, f.target, f.max()
+	f.Reset(base, maximum)
+	f.probeOnly(target)
+	f.targetLost = maxLostMTUProbes
+	f.lastProbeTime = now
+	f.reverted = true
+	if f.qlogger != nil {
+		f.qlogger.RecordEvent(qlog.MTUUpdated{Value: int(base)})
+	}
+	return true
+}
+
+// Ordinary data loss is a reason to re-confirm, not proof that MTU shrank.
+func (f *mtuFinder) requestConfirmation() {
+	if f.target != 0 && f.min >= f.target {
+		f.confirmUrgent = true
+	}
+}
+
+// One ordinary congestion-accounted packet after the target probe provides
+// a higher acknowledged packet number. ACK-driven loss detection then owns
+// the actual time threshold, including RTT changes and reordering allowance.
+func (f *mtuFinder) needsBaseFeedback() bool {
+	return f.confirmUrgent && f.inFlight != protocol.InvalidByteCount && !f.baseFeedbackSent
+}
+func (f *mtuFinder) nextUrgentProbeTime() monotime.Time {
+	if !f.confirmUrgent || f.inFlight != protocol.InvalidByteCount || f.lastProbeTime.IsZero() {
+		return 0
+	}
+	return f.lastProbeTime.Add(f.targetDelay())
 }

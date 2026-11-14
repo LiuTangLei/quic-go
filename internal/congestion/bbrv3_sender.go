@@ -471,6 +471,7 @@ func (b *bbrv3Sender) setMode(mode bbrv3Mode) {
 		b.connStats.SlowStartExits.Add(1)
 	}
 	b.mode, b.congestionWindowGain = mode, 2
+	b.connStats.BBRState.Store(uint32(mode) + 1)
 	switch mode {
 	case bbrv3Startup:
 		b.pacingGain = bbrv3StartupGain

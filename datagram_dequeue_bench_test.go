@@ -54,7 +54,7 @@ func BenchmarkDatagramPacketDrain(b *testing.B) {
 					for remaining := len(frames); remaining > 0; {
 						pl := payload{frames: storage[:0]}
 						if batched {
-							pl = q.appendDatagrams(pl, 1400, maxDatagramSendQueueLen, protocol.Version1)
+							pl = q.appendDatagrams(pl, 1400, maxDatagramSendQueueLen, protocol.Version1, true)
 						} else {
 							pl = legacyDatagramDrain(q, pl)
 						}

@@ -136,8 +136,9 @@ type Conn struct {
 	version     protocol.Version
 	config      *Config
 
-	conn      sendConn
-	sendQueue sender
+	conn          sendConn
+	sendQueue     sender
+	sendMTUErrors <-chan protocol.ByteCount
 
 	// lazily initialzed: most connections never migrate
 	pathManager         *pathManager
@@ -530,7 +531,9 @@ func (c *Conn) preSetup() {
 	c.largestRcvdAppData = protocol.InvalidPacketNumber
 	c.initialStream = newInitialCryptoStream(c.perspective == protocol.PerspectiveClient)
 	c.handshakeStream = newCryptoStream()
-	c.sendQueue = newSendQueue(c.conn)
+	queue := newSendQueue(c.conn)
+	c.sendQueue = queue
+	c.sendMTUErrors = queue.tooLarge
 	c.retransmissionQueue = newRetransmissionQueue()
 	c.frameParser = *wire.NewFrameParser(
 		c.config.EnableDatagrams,
@@ -574,6 +577,7 @@ func (c *Conn) preSetup() {
 	c.receivedPacketHandler = *ackhandler.NewReceivedPacketHandler(c.logger)
 
 	c.datagramQueue = newDatagramQueue(c.scheduleSending, c.logger, c.qlogger)
+	c.datagramQueue.connStats = &c.connStats
 	c.connState.Version = c.version
 }
 
@@ -612,6 +616,7 @@ func (c *Conn) run() (err error) {
 	}
 
 	var sendQueueAvailable <-chan struct{}
+	initialPathReady := c.config.InitialPathReady
 
 runLoop:
 	for {
@@ -636,6 +641,13 @@ runLoop:
 		// no need to set a timer if we can send packets immediately
 		if c.pacingDeadline != deadlineSendImmediately {
 			c.maybeResetTimer()
+		}
+
+		// Consume send errors even when received packets keep the loop busy.
+		select {
+		case size := <-c.sendMTUErrors:
+			c.handleMTUWriteError(size, monotime.Now())
+		default:
 		}
 
 		// 1st: handle undecryptable packets, if any.
@@ -683,6 +695,12 @@ runLoop:
 				break runLoop
 			case <-c.timer.C:
 			case <-c.sendingScheduled:
+			case size := <-c.sendMTUErrors:
+				c.handleMTUWriteError(size, monotime.Now())
+			case <-initialPathReady:
+				initialPathReady = nil
+				c.handleInitialPathReady()
+
 			case <-sendQueueAvailable:
 			case <-c.notifyReceivedPacket:
 				wasProcessed, err := c.handlePackets()
@@ -705,6 +723,9 @@ runLoop:
 				c.setCloseError(&closeError{err: err})
 				break runLoop
 			}
+			// A probe declared lost may have withdrawn the packet size in use.
+			c.handleMTULossFeedback()
+			c.applyPathMTU()
 		}
 
 		if keepAliveTime := c.nextKeepAliveTime(); !keepAliveTime.IsZero() && !now.Before(keepAliveTime) {
@@ -862,6 +883,7 @@ type ConnectionStats struct {
 	// Congestion diagnostics are independent atomic snapshots, not a single
 	// transaction. They do not contain payloads or keys.
 	CongestionControl            string
+	BBRState                     string
 	BytesInFlight                uint64
 	SlowStart                    bool
 	SlowStartExits               uint64
@@ -877,6 +899,7 @@ func (c *Conn) ConnectionStats() ConnectionStats {
 	}
 	return ConnectionStats{
 		CongestionControl: controller,
+		BBRState:          utils.BBRStateName(c.connStats.BBRState.Load()),
 		MinRTT:            c.rttStats.MinRTT(),
 		LatestRTT:         c.rttStats.LatestRTT(),
 		SmoothedRTT:       c.rttStats.SmoothedRTT(),
@@ -953,6 +976,16 @@ func (c *Conn) maybeResetTimer() {
 	if !c.pacingDeadline.IsZero() && c.pacingDeadline.Before(deadline) {
 		deadline = c.pacingDeadline
 	}
+	if c.mtuDiscoverer != nil {
+		if t := c.mtuDiscoverer.nextUrgentProbeTime(); !t.IsZero() {
+			if !c.pacingDeadline.IsZero() && c.pacingDeadline.After(t) {
+				t = c.pacingDeadline
+			}
+			if t.Before(deadline) {
+				deadline = t
+			}
+		}
+	}
 	c.timer.Reset(monotime.Until(deadline))
 }
 
@@ -970,11 +1003,11 @@ func (c *Conn) switchToNewPath(tr *Transport, now monotime.Time) {
 	c.maxPayloadSizeEstimate.Store(uint32(estimateMaxPayloadSize(initialPacketSize)))
 	c.mtuDiscoverer.Reset(initialPacketSize, c.maxMTU())
 	c.conn = newSendConn(tr.conn, c.conn.RemoteAddr(), packetInfo{}, utils.DefaultLogger) // TODO: find a better way
-	if !c.config.DisablePathMTUDiscovery && c.conn.capabilities().DF {
-		c.mtuDiscoverer.Start(now)
-	}
+	c.startMTUDiscovery(now)
 	c.sendQueue.Close()
-	c.sendQueue = newSendQueue(c.conn)
+	queue := newSendQueue(c.conn)
+	c.sendQueue = queue
+	c.sendMTUErrors = queue.tooLarge
 	go func() {
 		if err := c.sendQueue.Run(); err != nil {
 			c.destroyImpl(err)
@@ -1067,9 +1100,7 @@ func (c *Conn) handleHandshakeConfirmed(now monotime.Time) error {
 	c.handshakeConfirmed = true
 	c.cryptoStreamHandler.SetHandshakeConfirmed()
 
-	if !c.config.DisablePathMTUDiscovery && c.conn.capabilities().DF {
-		c.mtuDiscoverer.Start(now)
-	}
+	c.startMTUDiscovery(now)
 	return nil
 }
 
@@ -1372,9 +1403,7 @@ func (c *Conn) handleShortHeaderPacket(
 	c.sentPacketHandler.MigratedPath(p.rcvTime, initialPacketSize)
 	c.maxPayloadSizeEstimate.Store(uint32(estimateMaxPayloadSize(initialPacketSize)))
 	c.mtuDiscoverer.Reset(initialPacketSize, c.maxMTU())
-	if !c.config.DisablePathMTUDiscovery && c.conn.capabilities().DF {
-		c.mtuDiscoverer.Start(p.rcvTime)
-	}
+	c.startMTUDiscovery(p.rcvTime)
 	c.conn.ChangeRemoteAddr(p.remoteAddr, p.info)
 	return true, nil
 }
@@ -2195,6 +2224,7 @@ func (c *Conn) handleAckFrame(frame *wire.AckFrame, encLevel protocol.Encryption
 	if err != nil {
 		return err
 	}
+	c.handleMTULossFeedback()
 	if !acked1RTTPacket {
 		return nil
 	}
@@ -2207,14 +2237,7 @@ func (c *Conn) handleAckFrame(frame *wire.AckFrame, encLevel protocol.Encryption
 		}
 	}
 	// If one of the acknowledged packets was a Path MTU probe packet, this might have increased the Path MTU estimate.
-	if c.mtuDiscoverer != nil {
-		mtu := c.mtuDiscoverer.CurrentSize()
-		maxPayloadSize := estimateMaxPayloadSize(mtu)
-		if maxPayloadSize > protocol.ByteCount(c.maxPayloadSizeEstimate.Load()) {
-			c.maxPayloadSizeEstimate.Store(uint32(maxPayloadSize))
-			c.sentPacketHandler.SetMaxDatagramSize(mtu)
-		}
-	}
+	c.applyPathMTU()
 	return c.cryptoStreamHandler.SetLargest1RTTAcked(frame.LargestAcked())
 }
 
@@ -2523,6 +2546,47 @@ func (c *Conn) applyTransportParameters() {
 	}
 }
 
+// startMTUDiscovery begins probing for larger packets once the handshake is
+// confirmed. With DF the largest size is searched for. Without it a larger
+// packet may be fragmented on the way, so there is nothing to search; only
+// the one size the application asked for is tried (Config.PacketSizeTarget).
+func (c *Conn) startMTUDiscovery(now monotime.Time) {
+	if c.config.DisablePathMTUDiscovery {
+		return
+	}
+	if c.conn.capabilities().DF {
+		c.mtuDiscoverer.Start(now)
+		return
+	}
+	target := protocol.ByteCount(c.config.PacketSizeTarget)
+	if target > c.mtuDiscoverer.CurrentSize() && target <= c.maxMTU() {
+		c.mtuDiscoverer.probeOnly(target)
+		c.mtuDiscoverer.Start(now)
+	}
+}
+
+// applyPathMTU makes the packet size found by MTU discovery effective. The
+// size grows when a probe was acknowledged, and shrinks only when discovery
+// withdrew a size in use.
+func (c *Conn) applyPathMTU() {
+	if c.mtuDiscoverer == nil {
+		return
+	}
+	mtu := c.mtuDiscoverer.CurrentSize()
+	maxPayloadSize := estimateMaxPayloadSize(mtu)
+	current := protocol.ByteCount(c.maxPayloadSizeEstimate.Load())
+	if maxPayloadSize > current || (c.mtuDiscoverer.takeReverted() && maxPayloadSize < current) {
+		c.maxPayloadSizeEstimate.Store(uint32(maxPayloadSize))
+		c.sentPacketHandler.SetMaxDatagramSize(mtu)
+	}
+}
+
+// PacketSize returns the size of the largest packet the connection currently
+// sends. It starts at the initial packet size and changes with MTU discovery.
+func (c *Conn) PacketSize() int {
+	return int(c.maxPayloadSizeEstimate.Load()) + maxShortHeaderOverhead
+}
+
 func (c *Conn) maxMTU() protocol.ByteCount {
 	if c.peerParams == nil || c.peerParams.MaxUDPPayloadSize <= 0 {
 		return protocol.MaxPacketBufferSize
@@ -2589,6 +2653,24 @@ func (c *Conn) sendPackets(now monotime.Time) error {
 				return nil
 			}
 		}
+	}
+
+	if c.handshakeConfirmed && c.mtuDiscoverer != nil && c.mtuDiscoverer.needsBaseFeedback() {
+		ping := ackhandler.Frame{Frame: &wire.PingFrame{}}
+		p, buf, err := c.packer.PackMTUProbePacket(ping, c.mtuDiscoverer.base, c.version)
+		if err != nil {
+			return err
+		}
+		// This is ordinary congestion-accounted delivery feedback, not a
+		// non-congestion MTU/path probe. It advances the ACK/loss clock.
+		p.IsPathMTUProbePacket = false
+		ecn := c.sentPacketHandler.ECNMode(true)
+		c.logShortHeaderPacket(p, ecn, buf.Len())
+		c.registerPackedShortHeaderPacket(p, ecn, now)
+		c.sendQueue.Send(buf, 0, ecn)
+		c.mtuDiscoverer.baseFeedbackSent = true
+		c.scheduleSending()
+		return nil
 	}
 
 	// Path MTU Discovery
@@ -2786,6 +2868,15 @@ func (c *Conn) sendProbePacket(sendMode ackhandler.SendMode, now monotime.Time) 
 	default:
 		return fmt.Errorf("connection BUG: unexpected send mode: %d", sendMode)
 	}
+	probeSize, full := c.maxPacketSize(), true
+	if encLevel == protocol.Encryption1RTT && c.handshakeConfirmed && c.mtuDiscoverer != nil {
+		f := c.mtuDiscoverer
+		if f.target != 0 && f.min > f.base {
+			probeSize = min(probeSize, f.base)
+			full = false
+			f.requestConfirmation()
+		}
+	}
 	// Queue probe packets until we actually send out a packet,
 	// or until there are no more packets to queue.
 	var packet *coalescedPacket
@@ -2794,14 +2885,14 @@ func (c *Conn) sendProbePacket(sendMode ackhandler.SendMode, now monotime.Time) 
 			break
 		}
 		var err error
-		packet, err = c.packer.PackPTOProbePacket(encLevel, c.maxPacketSize(), false, now, c.version)
+		packet, err = c.packer.PackPTOProbePacket(encLevel, probeSize, false, full, now, c.version)
 		if err != nil {
 			return err
 		}
 	}
 	if packet == nil {
 		var err error
-		packet, err = c.packer.PackPTOProbePacket(encLevel, c.maxPacketSize(), true, now, c.version)
+		packet, err = c.packer.PackPTOProbePacket(encLevel, probeSize, true, full, now, c.version)
 		if err != nil {
 			return err
 		}
@@ -3156,10 +3247,7 @@ func (c *Conn) SendDatagramWithPrefix(prefix, p []byte) error {
 	f := &wire.DatagramFrame{DataLenPresent: true}
 	// The payload size estimate is conservative.
 	// Under many circumstances we could send a few more bytes.
-	maxDataLen := min(
-		f.MaxDataLen(params.MaxDatagramFrameSize, c.version),
-		protocol.ByteCount(c.maxPayloadSizeEstimate.Load()),
-	)
+	maxDataLen := c.maxDatagramDataLen(params)
 	// Subtraction avoids overflowing an int when accounting for both slices.
 	if protocol.ByteCount(len(prefix)) > maxDataLen || protocol.ByteCount(len(p)) > maxDataLen-protocol.ByteCount(len(prefix)) {
 		return &DatagramTooLargeError{MaxDatagramPayloadSize: int64(maxDataLen)}
@@ -3277,5 +3365,40 @@ func (c *Conn) NextConnection(ctx context.Context) (*Conn, error) {
 // It is not very sophisticated: it just subtracts the size of header (assuming the maximum
 // connection ID length), and the size of the encryption tag.
 func estimateMaxPayloadSize(mtu protocol.ByteCount) protocol.ByteCount {
-	return mtu - 1 /* type byte */ - 20 /* maximum connection ID length */ - 16 /* tag size */
+	return mtu - maxShortHeaderOverhead
+}
+
+const maxShortHeaderOverhead = 1 /* type byte */ + 20 /* maximum connection ID length */ + 16 /* tag size */
+
+// Prepare the outstanding Initial flight for the normal triggerSending path.
+// Reuses ordinary retransmission ownership; never resets BBR or changes PTO.
+func (c *Conn) handleInitialPathReady() {
+	if c.perspective != protocol.PerspectiveClient || c.receivedFirstPacket || c.handshakeComplete {
+		return
+	}
+	// Use the existing frame-requeue operation, including retiring the old
+	// flight from accounting. Otherwise ACKing the new copies would declare
+	// the slow-route originals lost and queue the same CRYPTO a third time.
+	// This does not enter PTO probe send mode: normal SendMode/pacing still gate it.
+	for c.sentPacketHandler.QueueProbePacket(protocol.PacketNumberSpaceInitial) {
+	}
+}
+
+// Only this connection loop owns the finder and congestion state. A local
+// EMSGSIZE is stronger evidence than a lost probe, but cannot make a smaller
+// than base path usable or withdraw an unconfirmed startup size.
+func (c *Conn) handleMTUWriteError(size protocol.ByteCount, now monotime.Time) {
+	if c.handshakeConfirmed && c.mtuDiscoverer != nil && c.mtuDiscoverer.withdrawAfterWriteError(size, now) {
+		c.applyPathMTU()
+	}
+}
+
+func (c *Conn) handleMTULossFeedback() {
+	f := c.mtuDiscoverer
+	if !c.handshakeConfirmed || f == nil || f.target == 0 {
+		return
+	}
+	if c.sentPacketHandler.TakeLostDataPacketSize() > f.base {
+		f.requestConfirmation()
+	}
 }

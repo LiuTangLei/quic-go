@@ -74,6 +74,7 @@ func (p *handshakePacketNumbers) Highest() protocol.PacketNumber {
 }
 
 type sentPacketHandler struct {
+	lostDataPacketSize protocol.ByteCount // owner-only, coalesced ordinary 1-RTT loss feedback
 	// Packet numbers and their history are shared across encryption levels.
 	// ACK processing and loss detection still use the state for each space.
 	pns  *packetNumberGenerator
@@ -814,8 +815,11 @@ func (h *sentPacketHandler) setLossDetectionTimer(now monotime.Time) {
 }
 
 func (h *sentPacketHandler) lossDetectionTime(now monotime.Time) alarmTimer {
+	// A higher packet number was ACKed: preserve its time-loss deadline even
+	// if the remaining packet is an MTU probe, which never drives PTO alone.
+	lossTime, encLevel := h.getLossTimeAndSpace()
 	// cancel the alarm if no packets are outstanding
-	if h.peerCompletedAddressValidation && !h.hist.HasOutstandingPackets() && !h.hist.HasOutstandingPathProbes() {
+	if h.peerCompletedAddressValidation && !h.hist.HasOutstandingPackets() && !h.hist.HasOutstandingPathProbes() && lossTime.IsZero() {
 		return alarmTimer{}
 	}
 
@@ -832,7 +836,6 @@ func (h *sentPacketHandler) lossDetectionTime(now monotime.Time) alarmTimer {
 	}
 
 	// early retransmit timer or time loss detection
-	lossTime, encLevel := h.getLossTimeAndSpace()
 	if !lossTime.IsZero() && (pathProbeLossTime.IsZero() || lossTime.Before(pathProbeLossTime)) {
 		return alarmTimer{
 			Time:            lossTime,
@@ -973,6 +976,9 @@ func (h *sentPacketHandler) detectLostPackets(now monotime.Time, encLevel protoc
 			pnSpace.lossTime = lossTime
 		}
 		if packetLost {
+			if p.EncryptionLevel == protocol.Encryption1RTT && p.Outstanding() {
+				h.lostDataPacketSize = max(h.lostDataPacketSize, p.Length)
+			}
 			if p.Outstanding() && space == protocol.PacketNumberSpaceAppData {
 				h.lostPackets.Add(pn, p.SendTime)
 			}
@@ -1201,6 +1207,7 @@ func (h *sentPacketHandler) queueFramesForRetransmission(p *packet) {
 }
 
 func (h *sentPacketHandler) ResetForRetry(now monotime.Time) {
+	h.lostDataPacketSize = 0
 	h.bytesInFlight = 0
 	var firstPacketSendTime monotime.Time
 	// Only Initial and 0-RTT packets can have been sent before a Retry.
@@ -1244,6 +1251,7 @@ func (h *sentPacketHandler) ResetForRetry(now monotime.Time) {
 }
 
 func (h *sentPacketHandler) MigratedPath(now monotime.Time, initialMaxDatagramSize protocol.ByteCount) {
+	h.lostDataPacketSize = 0
 	h.rttStats.ResetForPathMigration()
 	h.packetThresholdDisabled = false
 	h.timeThresholdEighths = defaultTimeThresholdEighths
@@ -1267,4 +1275,12 @@ func (h *sentPacketHandler) MigratedPath(now monotime.Time, initialMaxDatagramSi
 	h.congestion = congestion.NewBBRv3Sender(congestion.DefaultClock{}, h.rttStats, initialMaxDatagramSize, h.connStats)
 	h.qlogRecoveryParametersSet(true)
 	h.setLossDetectionTimer(now)
+}
+
+// TakeLostDataPacketSize coalesces loss events without retaining packet/frame
+// ownership. Only the connection loop calls it; no atomic or per-packet object.
+func (h *sentPacketHandler) TakeLostDataPacketSize() protocol.ByteCount {
+	size := h.lostDataPacketSize
+	h.lostDataPacketSize = 0
+	return size
 }

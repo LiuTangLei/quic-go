@@ -12,7 +12,7 @@ func TestSendQueueScratchReleased(t *testing.T) {
 	for _, failure := range []error{nil, errors.New("partial write")} {
 		for _, count := range []int{1, 8, 32} {
 			c := &sizedBatchTestConn{batchTestConn: &batchTestConn{failure: failure}, size: 32}
-			q := newSendQueue(c).(*sendQueue)
+			q := newSendQueue(c)
 			// Follow a large batch with a short one, including an error return.
 			for _, n := range []int{32, count} {
 				entries := make([]queueEntry, n)
@@ -45,7 +45,7 @@ func (*discardBatchConn) batchWriter() func([][]byte) error {
 func BenchmarkSendQueueReadyWrite(b *testing.B) {
 	for _, count := range []int{1, 8, 32} {
 		b.Run(fmt.Sprint(count), func(b *testing.B) {
-			q := newSendQueue(&discardBatchConn{}).(*sendQueue)
+			q := newSendQueue(&discardBatchConn{})
 			entries := make([]queueEntry, count)
 			b.ReportAllocs()
 			b.ResetTimer()

@@ -282,7 +282,7 @@ func TestPackOversizedInitialPacket(t *testing.T) {
 				p, err = tp.packer.PackConnectionClose(&qerr.TransportError{ErrorCode: qerr.ProtocolViolation}, protocol.MinInitialPacketSize, protocol.Version1)
 			case "PTO probe":
 				tp.ackFramer.EXPECT().GetAckFrame(protocol.EncryptionInitial, gomock.Any(), true)
-				p, err = tp.packer.PackPTOProbePacket(protocol.EncryptionInitial, protocol.MinInitialPacketSize, true, monotime.Now(), protocol.Version1)
+				p, err = tp.packer.PackPTOProbePacket(protocol.EncryptionInitial, protocol.MinInitialPacketSize, true, true, monotime.Now(), protocol.Version1)
 			}
 			require.ErrorContains(t, err, "packet too large")
 			require.Nil(t, p)
@@ -988,7 +988,7 @@ func testPackProbePacket(t *testing.T, encLevel protocol.EncryptionLevel, perspe
 	tp.pnManager.EXPECT().PeekPacketNumber(encLevel.PacketNumberSpace()).Return(protocol.PacketNumber(0x42), protocol.PacketNumberLen2)
 	tp.pnManager.EXPECT().PopPacketNumber(encLevel.PacketNumberSpace()).Return(protocol.PacketNumber(0x42))
 
-	p, err := tp.packer.PackPTOProbePacket(encLevel, maxPacketSize, false, monotime.Now(), protocol.Version1)
+	p, err := tp.packer.PackPTOProbePacket(encLevel, maxPacketSize, false, true, monotime.Now(), protocol.Version1)
 	require.NoError(t, err)
 	require.NotNil(t, p)
 	require.Len(t, p.longHdrPackets, 1)
@@ -1029,7 +1029,7 @@ func TestPack1RTTProbePacket(t *testing.T) {
 		},
 	)
 
-	p, err := tp.packer.PackPTOProbePacket(protocol.Encryption1RTT, maxPacketSize, false, monotime.Now(), protocol.Version1)
+	p, err := tp.packer.PackPTOProbePacket(protocol.Encryption1RTT, maxPacketSize, false, true, monotime.Now(), protocol.Version1)
 	require.NoError(t, err)
 	require.NotNil(t, p)
 	require.True(t, p.IsOnlyShortHeaderPacket())
@@ -1071,13 +1071,13 @@ func testPackPTOProbePacketNothingToPack(t *testing.T, encLevel protocol.Encrypt
 	tp.ackFramer.EXPECT().GetAckFrame(encLevel, gomock.Any(), true).Times(2)
 
 	// don't force a PING to be sent
-	packet, err := tp.packer.PackPTOProbePacket(encLevel, maxPacketSize, false, monotime.Now(), protocol.Version1)
+	packet, err := tp.packer.PackPTOProbePacket(encLevel, maxPacketSize, false, true, monotime.Now(), protocol.Version1)
 	require.NoError(t, err)
 	require.Nil(t, packet)
 
 	// now force a PING to be sent
 	tp.pnManager.EXPECT().PopPacketNumber(encLevel.PacketNumberSpace()).Return(protocol.PacketNumber(0x42))
-	packet, err = tp.packer.PackPTOProbePacket(encLevel, maxPacketSize, true, monotime.Now(), protocol.Version1)
+	packet, err = tp.packer.PackPTOProbePacket(encLevel, maxPacketSize, true, true, monotime.Now(), protocol.Version1)
 	require.NoError(t, err)
 	require.NotNil(t, packet)
 	var frames []ackhandler.Frame

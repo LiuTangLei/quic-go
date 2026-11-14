@@ -131,6 +131,13 @@ type Config struct {
 	// Additionally, if the handshake doesn't complete in twice this time, the connection attempt is also aborted.
 	// If this value is zero, the timeout is set to 5 seconds.
 	HandshakeIdleTimeout time.Duration
+	// InitialPathReady is an optional one-shot signal from a logical packet
+	// carrier that it validated a faster route to the same peer. Before any
+	// server reply, a client requeues outstanding Initial CRYPTO once. The
+	// ordinary congestion controller, pacer, packet numbers and ACK accounting
+	// remain in use. Nil disables the signal; it is not a migration API.
+	InitialPathReady <-chan struct{}
+
 	// MaxIdleTimeout is the maximum duration that may pass without any incoming network activity.
 	// The actual value for the idle timeout is the minimum of this value and the peer's.
 	// This value only applies after the handshake has completed.
@@ -192,6 +199,16 @@ type Config struct {
 	// a "message too long" error at that size fails the handshake instead.
 	// Values below 1200 are invalid.
 	InitialPacketSize uint16
+	// PacketSizeTarget is one larger packet size to try on a PacketConn that
+	// cannot set the Don't Fragment (DF) bit, where the search for the largest
+	// size is not available. After the handshake only this size is probed.
+	// Once a probe has been acknowledged the size is used, and it is confirmed
+	// again from time to time: if the path stops carrying it, the connection
+	// returns to its initial packet size and tries again later.
+	// Zero, a value not above the initial packet size, or a value above the
+	// peer's max_udp_payload_size disables it. It has no effect when DF is
+	// available or when DisablePathMTUDiscovery is set.
+	PacketSizeTarget uint16
 	// DisablePathMTUDiscovery disables Path MTU Discovery (RFC 8899).
 	// This allows the sending of QUIC packets that fully utilize the available MTU of the path.
 	// Path MTU discovery is only available on systems that allow setting of the Don't Fragment (DF) bit.

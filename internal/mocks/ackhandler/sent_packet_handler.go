@@ -601,6 +601,44 @@ func (c *MockSentPacketHandlerSetMaxDatagramSizeCall) DoAndReturn(f func(protoco
 	return c
 }
 
+// TakeLostDataPacketSize mocks base method.
+func (m *MockSentPacketHandler) TakeLostDataPacketSize() protocol.ByteCount {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "TakeLostDataPacketSize")
+	ret0, _ := ret[0].(protocol.ByteCount)
+	return ret0
+}
+
+// TakeLostDataPacketSize indicates an expected call of TakeLostDataPacketSize.
+func (mr *MockSentPacketHandlerMockRecorder) TakeLostDataPacketSize() *MockSentPacketHandlerTakeLostDataPacketSizeCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "TakeLostDataPacketSize", reflect.TypeOf((*MockSentPacketHandler)(nil).TakeLostDataPacketSize))
+	return &MockSentPacketHandlerTakeLostDataPacketSizeCall{Call: call}
+}
+
+// MockSentPacketHandlerTakeLostDataPacketSizeCall wrap *gomock.Call
+type MockSentPacketHandlerTakeLostDataPacketSizeCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockSentPacketHandlerTakeLostDataPacketSizeCall) Return(arg0 protocol.ByteCount) *MockSentPacketHandlerTakeLostDataPacketSizeCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockSentPacketHandlerTakeLostDataPacketSizeCall) Do(f func() protocol.ByteCount) *MockSentPacketHandlerTakeLostDataPacketSizeCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockSentPacketHandlerTakeLostDataPacketSizeCall) DoAndReturn(f func() protocol.ByteCount) *MockSentPacketHandlerTakeLostDataPacketSizeCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // TimeUntilSend mocks base method.
 func (m *MockSentPacketHandler) TimeUntilSend() monotime.Time {
 	m.ctrl.T.Helper()

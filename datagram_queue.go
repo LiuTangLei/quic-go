@@ -10,6 +10,8 @@ import (
 	"github.com/quic-go/quic-go/qlog"
 	"github.com/quic-go/quic-go/qlogwriter"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 const (
@@ -20,6 +22,8 @@ const (
 )
 
 type datagramQueue struct {
+	connStats                  *utils.ConnectionStats
+	sendWaits                  [8]datagramSendWait
 	sendMx                     sync.Mutex
 	sendQueue                  ringbuffer.RingBuffer[*wire.DatagramFrame]
 	sent                       chan struct{}
@@ -61,10 +65,8 @@ func (h *datagramQueue) Add(f *wire.DatagramFrame) error {
 		}
 		h.sendMx.Unlock()
 		// The queue is full. Wait until a frame is dequeued.
-		select {
-		case <-h.closed:
-			return h.closeErr
-		case <-h.sent:
+		if err := h.waitForSendSpace(false); err != nil {
+			return err
 		}
 		h.sendMx.Lock()
 	}
@@ -151,4 +153,70 @@ func (c *Conn) DatagramReceiveQueueStats() (queued, queuedBytes int, dropped uin
 	q.rcvMx.Lock()
 	defer q.rcvMx.Unlock()
 	return q.rcvSize, q.rcvBytes, q.rcvDrops
+}
+
+// Wait counters describe backpressure, not network loss. BBRState is sampled
+// at wait entry; a wait may span transitions. Counts include active waits,
+// while durations include only completed waits. No queue bound is changed.
+type DatagramSendWaitStats struct {
+	BBRState       string
+	Waits          uint64
+	BatchWaits     uint64
+	Nanoseconds    uint64
+	MaxNanoseconds uint64
+}
+type DatagramSendQueueStats struct {
+	Queued     int
+	ByBBRState [8]DatagramSendWaitStats
+}
+type datagramSendWait struct {
+	count, batch, nanoseconds, maxNanoseconds atomic.Uint64
+}
+
+func (h *datagramQueue) waitForSendSpace(batch bool) error {
+	state := uint32(0)
+	if h.connStats != nil {
+		state = h.connStats.BBRState.Load()
+	}
+	if state >= uint32(len(h.sendWaits)) {
+		state = 0
+	}
+	stats := &h.sendWaits[state]
+	started := time.Now()
+	stats.count.Add(1)
+	if batch {
+		stats.batch.Add(1)
+	}
+	var err error
+	select {
+	case <-h.closed:
+		err = h.closeErr
+	case <-h.sent:
+	}
+	elapsed := uint64(time.Since(started))
+	stats.nanoseconds.Add(elapsed)
+	for old := stats.maxNanoseconds.Load(); elapsed > old; old = stats.maxNanoseconds.Load() {
+		if stats.maxNanoseconds.CompareAndSwap(old, elapsed) {
+			break
+		}
+	}
+	return err
+}
+
+// DatagramSendQueueStats can be called concurrently with sending. Counters
+// live for this connection only, with independent atomic snapshots.
+func (c *Conn) DatagramSendQueueStats() DatagramSendQueueStats {
+	var out DatagramSendQueueStats
+	q := c.datagramQueue
+	if q == nil {
+		return out
+	}
+	q.sendMx.Lock()
+	out.Queued = q.sendQueue.Len()
+	q.sendMx.Unlock()
+	for i := range q.sendWaits {
+		v := &q.sendWaits[i]
+		out.ByBBRState[i] = DatagramSendWaitStats{BBRState: utils.BBRStateName(uint32(i)), Waits: v.count.Load(), BatchWaits: v.batch.Load(), Nanoseconds: v.nanoseconds.Load(), MaxNanoseconds: v.maxNanoseconds.Load()}
+	}
+	return out
 }

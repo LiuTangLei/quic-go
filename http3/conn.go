@@ -34,6 +34,8 @@ type rawConn struct {
 
 	streamMx sync.Mutex
 	streams  map[quic.StreamID]*stateTrackingStream
+	// early holds datagrams that raced ahead of their request stream.
+	early earlyDatagrams
 
 	rcvdControlStr      atomic.Bool
 	rcvdQPACKEncoderStr atomic.Bool
@@ -122,7 +124,13 @@ func (c *rawConn) TrackStream(str *quic.Stream) *stateTrackingStream {
 	c.streamMx.Lock()
 	c.streams[str.StreamID()] = hstr
 	c.qloggerWG.Add(1)
+	held := c.early.take(str.StreamID())
 	c.streamMx.Unlock()
+	// Deliver outside streamMx: the stream takes its own lock, and it calls
+	// back into clearStream while holding it.
+	for _, data := range held {
+		hstr.enqueueDatagram(data)
+	}
 	return hstr
 }
 
@@ -304,6 +312,11 @@ func (c *rawConn) receiveDatagrams() error {
 		streamID := quic.StreamID(4 * quarterStreamID)
 		c.streamMx.Lock()
 		dg, ok := c.streams[streamID]
+		if !ok {
+			// The request stream may not have been accepted yet. Keep a
+			// bounded number of datagrams for it instead of dropping them.
+			c.early.hold(streamID, b[n:])
+		}
 		c.streamMx.Unlock()
 		if !ok {
 			continue

@@ -28,7 +28,8 @@ type sendQueue struct {
 	available   chan struct{}
 	conn        sendConn
 	batchWrite  func([][]byte) error
-	batchData   [][]byte // owned by Run; cleared after every synchronous write
+	batchData   [][]byte                // owned by Run; cleared after every synchronous write
+	tooLarge    chan protocol.ByteCount // bounded report to the connection owner; never closed
 }
 
 var _ sender = &sendQueue{}
@@ -36,7 +37,7 @@ var _ sender = &sendQueue{}
 const sendQueueCapacity = 8
 const maxPortableBatchSize = 32
 
-func newSendQueue(conn sendConn) sender {
+func newSendQueue(conn sendConn) *sendQueue {
 	var batchWrite func([][]byte) error
 	if c, ok := conn.(interface{ batchWriter() func([][]byte) error }); ok {
 		batchWrite = c.batchWriter()
@@ -55,6 +56,7 @@ func newSendQueue(conn sendConn) sender {
 	}
 	return &sendQueue{
 		batchWrite:  batchWrite,
+		tooLarge:    make(chan protocol.ByteCount, 1),
 		batchData:   batchData,
 		conn:        conn,
 		runStopped:  make(chan struct{}),
@@ -135,6 +137,7 @@ func (h *sendQueue) Run() error {
 				continue
 			}
 			if err := h.conn.Write(e.buf.Data, e.gsoSize, e.ecn); err != nil {
+				h.reportWriteError(err, len(e.buf.Data), e.gsoSize)
 				// This additional check enables:
 				// 1. Checking for "datagram too large" message from the kernel, as such,
 				// 2. Path MTU discovery,and
@@ -156,4 +159,21 @@ func (h *sendQueue) Close() {
 	close(h.closeCalled)
 	// wait until the run loop returned
 	<-h.runStopped
+}
+
+// GSO errors concern one UDP segment, not the combined host write size.
+// Batch errors report the largest datagram in the failed group; its write may
+// have been partial, so nothing is replayed. The owner may conservatively
+// withdraw a target it can no longer safely assume.
+func (h *sendQueue) reportWriteError(err error, size int, gso uint16) {
+	if !isSendMsgSizeErr(err) {
+		return
+	}
+	if gso != 0 {
+		size = int(gso)
+	}
+	select {
+	case h.tooLarge <- protocol.ByteCount(size):
+	default:
+	}
 }

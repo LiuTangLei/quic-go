@@ -15,7 +15,7 @@ func TestDatagramDrainRetainsACKBlockedHead(t *testing.T) {
 	head := &wire.DatagramFrame{DataLenPresent: true, Data: make([]byte, 1000)}
 	require.NoError(t, q.Add(head))
 	ack := &wire.AckFrame{}
-	pl := q.appendDatagrams(payload{ack: ack, length: 30}, 1020, maxDatagramSendQueueLen, protocol.Version1)
+	pl := q.appendDatagrams(payload{ack: ack, length: 30}, 1020, maxDatagramSendQueueLen, protocol.Version1, true)
 	require.Empty(t, pl.frames)
 	require.Equal(t, protocol.ByteCount(30), pl.length)
 	require.Same(t, head, q.Peek())
@@ -25,7 +25,7 @@ func TestDatagramDrainRetainsACKBlockedHead(t *testing.T) {
 	default:
 	}
 	// The same head fits the next packet; ownership moves to the payload.
-	pl = q.appendDatagrams(payload{}, 1020, maxDatagramSendQueueLen, protocol.Version1)
+	pl = q.appendDatagrams(payload{}, 1020, maxDatagramSendQueueLen, protocol.Version1, true)
 	require.Len(t, pl.frames, 1)
 	require.Same(t, head, pl.frames[0].Frame)
 	require.Nil(t, q.Peek())
@@ -52,7 +52,7 @@ func TestDatagramDrainWakesPartialBatchProducer(t *testing.T) {
 		}()
 		synctest.Wait()
 		for batch := range 2 {
-			pl := q.appendDatagrams(payload{}, 1400, 2, protocol.Version1)
+			pl := q.appendDatagrams(payload{}, 1400, 2, protocol.Version1, true)
 			require.Len(t, pl.frames, 2)
 			for i, frame := range pl.frames {
 				require.Equal(t, []byte{byte(batch*2 + i)}, frame.Frame.(*wire.DatagramFrame).Data)
@@ -70,7 +70,7 @@ func TestDatagramDrainWakesPartialBatchProducer(t *testing.T) {
 		r := <-done
 		require.NoError(t, r.err)
 		require.Equal(t, 4, r.n)
-		pl := q.appendDatagrams(payload{}, 1400, maxDatagramSendQueueLen, protocol.Version1)
+		pl := q.appendDatagrams(payload{}, 1400, maxDatagramSendQueueLen, protocol.Version1, true)
 		require.Len(t, pl.frames, maxDatagramSendQueueLen)
 		for i, frame := range pl.frames {
 			require.Equal(t, []byte{byte(4 + i)}, frame.Frame.(*wire.DatagramFrame).Data)

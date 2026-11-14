@@ -24,7 +24,7 @@ func TestPacketConnBatchCapacity(t *testing.T) {
 		{"sized writer", &sizedBatchPacketConn{}, 32},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			q := newSendQueue(&sconn{rawConn: &basicConn{PacketConn: tc.pc}}).(*sendQueue)
+			q := newSendQueue(&sconn{rawConn: &basicConn{PacketConn: tc.pc}})
 			if cap(q.queue) != tc.want {
 				t.Fatalf("capacity=%d want=%d", cap(q.queue), tc.want)
 			}

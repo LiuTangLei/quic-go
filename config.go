@@ -55,6 +55,9 @@ func validateConfig(config *Config) error {
 	if config.InitialPacketSize > protocol.MaxPacketBufferSize {
 		config.InitialPacketSize = protocol.MaxPacketBufferSize
 	}
+	if config.PacketSizeTarget > protocol.MaxPacketBufferSize {
+		config.PacketSizeTarget = protocol.MaxPacketBufferSize
+	}
 	// check that all QUIC versions are actually supported
 	for _, v := range config.Versions {
 		if !protocol.IsValidVersion(v) {
@@ -119,6 +122,7 @@ func populateConfig(config *Config) *Config {
 		EnableCubic:                      false,
 		Versions:                         versions,
 		HandshakeIdleTimeout:             handshakeIdleTimeout,
+		InitialPathReady:                 config.InitialPathReady,
 		MaxIdleTimeout:                   idleTimeout,
 		KeepAlivePeriod:                  config.KeepAlivePeriod,
 		InitialStreamReceiveWindow:       initialStreamReceiveWindow,
@@ -131,6 +135,7 @@ func populateConfig(config *Config) *Config {
 		TokenStore:                       config.TokenStore,
 		EnableDatagrams:                  config.EnableDatagrams,
 		InitialPacketSize:                config.InitialPacketSize,
+		PacketSizeTarget:                 config.PacketSizeTarget,
 		DisablePathMTUDiscovery:          config.DisablePathMTUDiscovery,
 		EnableStreamResetPartialDelivery: config.EnableStreamResetPartialDelivery,
 		Allow0RTT:                        config.Allow0RTT,

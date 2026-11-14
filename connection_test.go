@@ -2542,8 +2542,8 @@ func testConnectionPTOProbePackets(t *testing.T, encLevel protocol.EncryptionLev
 		sph.EXPECT().QueueProbePacket(encLevel.PacketNumberSpace()).Return(false)
 		sph.EXPECT().SentPacket(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any())
 
-		tc.packer.EXPECT().PackPTOProbePacket(encLevel, gomock.Any(), true, gomock.Any(), protocol.Version1).DoAndReturn(
-			func(protocol.EncryptionLevel, protocol.ByteCount, bool, monotime.Time, protocol.Version) (*coalescedPacket, error) {
+		tc.packer.EXPECT().PackPTOProbePacket(encLevel, gomock.Any(), true, true, gomock.Any(), protocol.Version1).DoAndReturn(
+			func(protocol.EncryptionLevel, protocol.ByteCount, bool, bool, monotime.Time, protocol.Version) (*coalescedPacket, error) {
 				return &coalescedPacket{
 					buffer:         getPacketBuffer(),
 					shortHdrPacket: &shortHeaderPacket{PacketNumber: 1},
@@ -3497,6 +3497,12 @@ func TestConnectionMigrationMTUDiscovery(t *testing.T) {
 
 			require.Equal(t, protocol.ByteCount(protocol.MinInitialPacketSize), tc.conn.mtuDiscoverer.CurrentSize())
 			maxPayloadSize := estimateMaxPayloadSize(protocol.MinInitialPacketSize)
+			// Until the handshake completes, a client is limited to what a 0-RTT packet carries.
+			require.Equal(t,
+				&DatagramTooLargeError{MaxDatagramPayloadSize: int64(maxPayloadSize - earlyDatagramOverhead(tc.conn.srcConnIDLen))},
+				tc.conn.SendDatagram(make([]byte, protocol.MinInitialPacketSize)),
+			)
+			close(tc.conn.handshakeCompleteChan)
 			require.Equal(t, &DatagramTooLargeError{MaxDatagramPayloadSize: int64(maxPayloadSize)}, tc.conn.SendDatagram(make([]byte, protocol.MinInitialPacketSize)))
 			require.False(t, tc.conn.mtuDiscoverer.ShouldSendProbe(now))
 			require.Equal(t, !test.disableMTU && test.df, tc.conn.mtuDiscoverer.ShouldSendProbe(now.Add(time.Hour)))

@@ -56,6 +56,7 @@ func newRawServerConn(
 		logger:         logger,
 	}
 	c.rawConn = *newRawConn(conn, enableDatagrams, c.onStreamsEmpty, c.handleControlStream, qlogger, logger)
+	c.rawConn.early.enabled = true // request streams are opened by the peer
 	if idleTimeout > 0 {
 		c.idleTimer = time.AfterFunc(idleTimeout, func() {
 			conn.CloseWithError(quic.ApplicationErrorCode(ErrCodeNoError), "idle timeout")

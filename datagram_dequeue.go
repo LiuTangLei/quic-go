@@ -9,7 +9,14 @@ import (
 // appendDatagrams drains only the ready FIFO prefix that fits this packet.
 // Keep one lock and one producer notification per packet, rather than a
 // Peek/Pop lock pair and notification per frame. Never wait for more data.
-func (h *datagramQueue) appendDatagrams(pl payload, maxPayloadSize protocol.ByteCount, limit int, v protocol.Version) payload {
+//
+// full says that maxPayloadSize is all a packet on this path can carry: a
+// 1-RTT packet that has the UDP datagram to itself. Only then does a frame
+// that does not fit an empty packet show that the path can no longer carry it.
+// A 0-RTT packet, or one that shares its datagram with handshake packets, is
+// smaller for reasons that end with the handshake; the frame waits for the
+// next packet instead of being dropped.
+func (h *datagramQueue) appendDatagrams(pl payload, maxPayloadSize protocol.ByteCount, limit int, v protocol.Version, full bool) payload {
 	h.sendMx.Lock()
 	removed := false
 	var dropped []int
@@ -20,7 +27,7 @@ func (h *datagramQueue) appendDatagrams(pl payload, maxPayloadSize protocol.Byte
 		f := h.sendQueue.PeekFront()
 		size := f.Length(v)
 		if size > maxPayloadSize-pl.length {
-			if pl.ack == nil && len(pl.frames) == 0 {
+			if full && pl.ack == nil && len(pl.frames) == 0 {
 				// Preserve the existing unreliable path-MTU drop policy only
 				// when the frame cannot fit an otherwise empty packet.
 				h.sendQueue.PopFront()
