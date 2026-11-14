@@ -148,7 +148,11 @@ type Conn struct {
 	version     protocol.Version
 	config      *Config
 
-	conn          sendConn
+	conn sendConn
+	// Public address getters must not read conn while the run loop replaces it
+	// during migration. Publish an immutable interface copy; the sendConn still
+	// provides its own synchronization for updates to the remote address.
+	addressConn   atomic.Pointer[sendConn]
 	sendQueue     sender
 	sendMTUErrors <-chan protocol.ByteCount
 
@@ -534,6 +538,7 @@ var newClientConnection = func(
 
 // r is the pathReceiver for the Transport that the connection was dialed or accepted on.
 func (c *Conn) preSetup(r *pathReceiver) {
+	c.setSendConn(c.conn)
 	c.largestRcvdAppData = protocol.InvalidPacketNumber
 	c.initialStream = newInitialCryptoStream(c.perspective == protocol.PerspectiveClient)
 	c.handshakeStream = newCryptoStream()
@@ -1010,7 +1015,7 @@ func (c *Conn) switchToNewPath(tr *Transport, now monotime.Time) {
 	c.sentPacketHandler.MigratedPath(now, initialPacketSize)
 	c.maxPayloadSizeEstimate.Store(uint32(estimateMaxPayloadSize(initialPacketSize)))
 	c.mtuDiscoverer.Reset(initialPacketSize, c.maxMTU())
-	c.conn = newSendConn(tr.conn, c.conn.RemoteAddr(), packetInfo{}, utils.DefaultLogger) // TODO: find a better way
+	c.setSendConn(newSendConn(tr.conn, c.conn.RemoteAddr(), packetInfo{}, utils.DefaultLogger)) // TODO: find a better way
 	c.startMTUDiscovery(now)
 	c.sendQueue.Close()
 	queue := newSendQueue(c.conn)
@@ -3345,10 +3350,17 @@ func (c *Conn) ReceiveDatagram(ctx context.Context) ([]byte, error) {
 }
 
 // LocalAddr returns the local address of the QUIC connection.
-func (c *Conn) LocalAddr() net.Addr { return c.conn.LocalAddr() }
+func (c *Conn) LocalAddr() net.Addr { return (*c.addressConn.Load()).LocalAddr() }
 
 // RemoteAddr returns the remote address of the QUIC connection.
-func (c *Conn) RemoteAddr() net.Addr { return c.conn.RemoteAddr() }
+func (c *Conn) RemoteAddr() net.Addr { return (*c.addressConn.Load()).RemoteAddr() }
+
+// Only constructors and the connection run loop replace the send connection.
+// Address readers use a separately published interface, never the mutable field.
+func (c *Conn) setSendConn(conn sendConn) {
+	c.conn = conn
+	c.addressConn.Store(&conn)
+}
 
 // getPathManager lazily initializes the Conn's pathManagerOutgoing.
 // May create multiple pathManagerOutgoing objects if called concurrently.
