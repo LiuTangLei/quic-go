@@ -297,6 +297,17 @@ func TestSentPacketHandlerRTTAckEliciting(t *testing.T) {
 	require.Equal(t, 800*time.Millisecond, rttStats.LatestRTT())
 	require.Zero(t, getPacketsInFlight())
 	require.Zero(t, getBytesInFlight())
+
+	sph.MigratedPath(now, 1200)
+	eventRecorder.Clear()
+	sendPacket(t, now, 1200, true)
+	metrics := eventRecorder.Events(qlog.MetricsUpdated{})
+	require.Len(t, metrics, 1)
+	require.Equal(t, qlog.MetricsUpdated{
+		CongestionWindow: 32 * 1200,
+		BytesInFlight:    1200,
+		PacketsInFlight:  1,
+	}, metrics[0])
 }
 
 func TestSentPacketHandlerRTTAcrossPacketNumberSpaces(t *testing.T) {
@@ -628,6 +639,7 @@ func testSentPacketHandlerAmplificationLimitClient(t *testing.T, dropHandshake b
 
 func TestSentPacketHandlerDelayBasedLossDetection(t *testing.T) {
 	rttStats := utils.NewRTTStats()
+	var eventRecorder events.Recorder
 	sph := NewSentPacketHandler(
 		0,
 		1200,
@@ -637,7 +649,7 @@ func TestSentPacketHandlerDelayBasedLossDetection(t *testing.T) {
 		false,
 		nil,
 		protocol.PerspectiveServer,
-		nil,
+		&eventRecorder,
 		utils.DefaultLogger,
 	)
 
@@ -679,6 +691,12 @@ func TestSentPacketHandlerDelayBasedLossDetection(t *testing.T) {
 	require.Len(t, packets.Lost, 1)
 	sph.OnLossDetectionTimeout(sph.GetLossDetectionTimeout())
 	require.Equal(t, []protocol.PacketNumber{pn1, pn2, pn3}, packets.Lost)
+	lost := eventRecorder.Events(qlog.PacketLost{})
+	require.Len(t, lost, 3)
+	for _, ev := range lost {
+		pl := ev.(qlog.PacketLost)
+		require.Equal(t, pl.Header.PacketNumber == pn3, pl.IsMTUProbePacket)
+	}
 }
 
 func TestSentPacketHandlerPacketBasedLossDetection(t *testing.T) {
@@ -790,7 +808,6 @@ func TestSentPacketHandlerAdaptiveTimeThreshold(t *testing.T) {
 		utils.DefaultLogger,
 	)
 	parameters := qlog.RecoveryParametersSet{
-		EncryptionLevel:         protocol.Encryption1RTT,
 		ReorderingThreshold:     packetThreshold,
 		TimeThreshold:           1.125,
 		TimerGranularity:        protocol.TimerGranularity,
@@ -959,19 +976,19 @@ func testSentPacketHandlerPTO(t *testing.T, encLevel protocol.EncryptionLevel, p
 			sph.SentPacket(ti, pn, protocol.InvalidPacketNumber, nil, []Frame{packets.NewPingFrame(pn)}, encLevel, protocol.ECNNon, 1000, false, false)
 			require.Equal(t,
 				[]qlogwriter.Event{
-					qlog.LossTimerUpdated{
-						Type:      qlog.LossTimerUpdateTypeSet,
+					qlog.TimerUpdated{
+						Type:      qlog.TimerEventTypeSet,
 						TimerType: qlog.TimerTypePTO,
 						EncLevel:  encLevel,
 						Time:      ti.ToTime().Add(rttStats.PTO(encLevel == protocol.Encryption1RTT) << ptoCount),
 					},
 				},
-				eventRecorder.Events(qlog.LossTimerUpdated{}),
+				eventRecorder.Events(qlog.TimerUpdated{}),
 			)
 			eventRecorder.Clear()
 		} else {
 			sph.SentPacket(ti, pn, protocol.InvalidPacketNumber, nil, nil, encLevel, protocol.ECNNon, 1000, true, false)
-			require.Empty(t, eventRecorder.Events(qlog.LossTimerUpdated{}))
+			require.Empty(t, eventRecorder.Events(qlog.TimerUpdated{}))
 		}
 		return pn
 	}
@@ -1002,20 +1019,20 @@ func testSentPacketHandlerPTO(t *testing.T, encLevel protocol.EncryptionLevel, p
 	sph.OnLossDetectionTimeout(timeout)
 	require.Equal(t,
 		[]qlogwriter.Event{
-			qlog.LossTimerUpdated{
-				Type:      qlog.LossTimerUpdateTypeExpired,
+			qlog.TimerUpdated{
+				Type:      qlog.TimerEventTypeExpired,
 				TimerType: qlog.TimerTypePTO,
 				EncLevel:  encLevel,
 			},
 			qlog.PTOCountUpdated{PTOCount: 1},
-			qlog.LossTimerUpdated{
-				Type:      qlog.LossTimerUpdateTypeSet,
+			qlog.TimerUpdated{
+				Type:      qlog.TimerEventTypeSet,
 				TimerType: qlog.TimerTypePTO,
 				EncLevel:  encLevel,
 				Time:      sendTimes[2].Add(2 * rttStats.PTO(encLevel == protocol.Encryption1RTT)).ToTime(),
 			},
 		},
-		eventRecorder.Events(qlog.PTOCountUpdated{}, qlog.LossTimerUpdated{}),
+		eventRecorder.Events(qlog.PTOCountUpdated{}, qlog.TimerUpdated{}),
 	)
 	// PTO timer expiration doesn't declare packets lost
 	require.Empty(t, packets.Lost)
@@ -1056,20 +1073,20 @@ func testSentPacketHandlerPTO(t *testing.T, encLevel protocol.EncryptionLevel, p
 	sph.OnLossDetectionTimeout(timeout)
 	require.Equal(t,
 		[]qlogwriter.Event{
-			qlog.LossTimerUpdated{
-				Type:      qlog.LossTimerUpdateTypeExpired,
+			qlog.TimerUpdated{
+				Type:      qlog.TimerEventTypeExpired,
 				TimerType: qlog.TimerTypePTO,
 				EncLevel:  encLevel,
 			},
 			qlog.PTOCountUpdated{PTOCount: 2},
-			qlog.LossTimerUpdated{
-				Type:      qlog.LossTimerUpdateTypeSet,
+			qlog.TimerUpdated{
+				Type:      qlog.TimerEventTypeSet,
 				TimerType: qlog.TimerTypePTO,
 				EncLevel:  encLevel,
 				Time:      sendTimes[6].Add(4 * rttStats.PTO(encLevel == protocol.Encryption1RTT)).ToTime(),
 			},
 		},
-		eventRecorder.Events(qlog.LossTimerUpdated{}, qlog.PTOCountUpdated{}),
+		eventRecorder.Events(qlog.TimerUpdated{}, qlog.PTOCountUpdated{}),
 	)
 	eventRecorder.Clear()
 	// PTO timer expiration doesn't declare packets lost
@@ -1110,14 +1127,14 @@ func testSentPacketHandlerPTO(t *testing.T, encLevel protocol.EncryptionLevel, p
 	)
 	require.Equal(t,
 		[]qlogwriter.Event{
-			qlog.LossTimerUpdated{
-				Type:      qlog.LossTimerUpdateTypeSet,
+			qlog.TimerUpdated{
+				Type:      qlog.TimerEventTypeSet,
 				TimerType: qlog.TimerTypePTO,
 				EncLevel:  encLevel,
 				Time:      sendTimes[8].Add(rttStats.PTO(encLevel == protocol.Encryption1RTT)).ToTime(),
 			},
 		},
-		eventRecorder.Events(qlog.LossTimerUpdated{}),
+		eventRecorder.Events(qlog.TimerUpdated{}),
 	)
 	require.Contains(t, packets.Acked, pns[7])
 
@@ -1140,9 +1157,9 @@ func testSentPacketHandlerPTO(t *testing.T, encLevel protocol.EncryptionLevel, p
 	require.Zero(t, sph.GetLossDetectionTimeout())
 	require.Equal(t,
 		[]qlogwriter.Event{
-			qlog.LossTimerUpdated{Type: qlog.LossTimerUpdateTypeCancelled},
+			qlog.TimerUpdated{Type: qlog.TimerEventTypeCancelled},
 		},
-		eventRecorder.Events(qlog.LossTimerUpdated{}),
+		eventRecorder.Events(qlog.TimerUpdated{}),
 	)
 }
 
@@ -1941,7 +1958,6 @@ func TestSentPacketHandlerSpuriousLoss(t *testing.T) {
 		eventRecorder.Events(qlog.SpuriousLoss{}),
 	)
 	parameters := qlog.RecoveryParametersSet{
-		EncryptionLevel:         protocol.Encryption1RTT,
 		ReorderingThreshold:     packetThreshold,
 		PacketThresholdDisabled: true,
 		TimeThreshold:           1.125,

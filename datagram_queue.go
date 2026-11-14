@@ -97,7 +97,11 @@ func (h *datagramQueue) HandleDatagramFrame(f *wire.DatagramFrame) {
 			h.logger.Debugf("Discarding received DATAGRAM frame (%d bytes payload)", len(f.Data))
 		}
 		if h.qlogger != nil {
-			h.qlogger.RecordEvent(qlog.DatagramDropped{Direction: qlog.DirectionReceiving, Raw: qlog.RawInfo{Length: len(f.Data)}, Trigger: "buffer_full"})
+			h.qlogger.RecordEvent(qlog.DatagramDropped{
+				Direction: qlog.DirectionReceiving,
+				Raw:       qlog.RawInfo{Length: len(f.Data), PayloadLength: qlog.OmitLength},
+				Trigger:   "buffer_full",
+			})
 		}
 		return
 	}

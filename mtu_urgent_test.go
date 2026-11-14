@@ -245,7 +245,8 @@ func TestPackPTOTemporaryBudgetStillSplitsReliableFrames(t *testing.T) {
 	large := &wire.DatagramFrame{DataLenPresent: true, Data: make([]byte, 1240)}
 	require.NoError(t, tp.datagramQueue.Add(large))
 	tp.framer.EXPECT().HasData().Return(true)
-	tp.framer.EXPECT().Append(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), protocol.Version1).DoAndReturn(func(cf []ackhandler.Frame, sf []ackhandler.StreamFrame, size protocol.ByteCount, _ monotime.Time, v protocol.Version) ([]ackhandler.Frame, []ackhandler.StreamFrame, protocol.ByteCount) {
+	tp.framer.EXPECT().AppendControlFrames(gomock.Any(), gomock.Any(), gomock.Any(), protocol.Version1)
+	tp.framer.EXPECT().AppendStreamFrames(gomock.Any(), gomock.Any(), gomock.Any(), protocol.Version1).DoAndReturn(func(cf []ackhandler.Frame, sf []ackhandler.StreamFrame, size protocol.ByteCount, v protocol.Version) ([]ackhandler.Frame, []ackhandler.StreamFrame, protocol.ByteCount) {
 		frame, split := (&wire.StreamFrame{Data: make([]byte, 2400)}).MaybeSplitOffFrame(size, v)
 		require.True(t, split)
 		return cf, append(sf, ackhandler.StreamFrame{Frame: frame}), frame.Length(v)

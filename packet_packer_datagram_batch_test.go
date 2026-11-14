@@ -24,8 +24,11 @@ func datagramBatchPacker(t *testing.T, hasReliable bool) *testPacketPacker {
 	tp.sealingManager.EXPECT().Get1RTTSealer().Return(newMockShortHeaderSealer(ctrl), nil).AnyTimes()
 	tp.framer.EXPECT().HasData().Return(hasReliable).AnyTimes()
 	if hasReliable {
-		tp.framer.EXPECT().Append(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(func(f []ackhandler.Frame, s []ackhandler.StreamFrame, _ protocol.ByteCount, _ monotime.Time, _ protocol.Version) ([]ackhandler.Frame, []ackhandler.StreamFrame, protocol.ByteCount) {
-			return append(f, ackhandler.Frame{Frame: &wire.PingFrame{}}), s, 1
+		tp.framer.EXPECT().AppendControlFrames(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(func(f []ackhandler.Frame, _ protocol.ByteCount, _ monotime.Time, _ protocol.Version) ([]ackhandler.Frame, protocol.ByteCount) {
+			return append(f, ackhandler.Frame{Frame: &wire.PingFrame{}}), 1
+		}).AnyTimes()
+		tp.framer.EXPECT().AppendStreamFrames(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(func(f []ackhandler.Frame, s []ackhandler.StreamFrame, _ protocol.ByteCount, _ protocol.Version) ([]ackhandler.Frame, []ackhandler.StreamFrame, protocol.ByteCount) {
+			return f, s, 0
 		}).AnyTimes()
 	}
 	return tp

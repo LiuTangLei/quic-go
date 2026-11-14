@@ -25,7 +25,12 @@ func (h *datagramQueue) appendDatagrams(pl payload, maxPayloadSize protocol.Byte
 			break
 		}
 		f := h.sendQueue.PeekFront()
+		f.DataLenPresent = true
 		size := f.Length(v)
+		if size > maxPayloadSize-pl.length {
+			f.DataLenPresent = false
+			size = f.Length(v)
+		}
 		if size > maxPayloadSize-pl.length {
 			if full && pl.ack == nil && len(pl.frames) == 0 {
 				// Preserve the existing unreliable path-MTU drop policy only
@@ -37,6 +42,7 @@ func (h *datagramQueue) appendDatagrams(pl payload, maxPayloadSize protocol.Byte
 				removed = true
 				continue
 			}
+			f.DataLenPresent = true
 			// Do not skip a FIFO head just because an ACK or earlier frame
 			// consumed this packet's remaining space.
 			break
@@ -45,6 +51,9 @@ func (h *datagramQueue) appendDatagrams(pl payload, maxPayloadSize protocol.Byte
 		pl.length += size
 		h.sendQueue.PopFront()
 		removed = true
+		if !f.DataLenPresent {
+			break // a frame without a length must be last
+		}
 	}
 	h.sendMx.Unlock()
 	if removed {
@@ -54,7 +63,7 @@ func (h *datagramQueue) appendDatagrams(pl payload, maxPayloadSize protocol.Byte
 		}
 	}
 	for _, size := range dropped {
-		h.qlogger.RecordEvent(qlog.DatagramDropped{Direction: qlog.DirectionSending, Raw: qlog.RawInfo{Length: size}, Trigger: "too_large"})
+		h.qlogger.RecordEvent(qlog.DatagramDropped{Direction: qlog.DirectionSending, Raw: qlog.RawInfo{Length: size, PayloadLength: qlog.OmitLength}, Trigger: "too_large"})
 	}
 	return pl
 }

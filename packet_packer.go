@@ -38,8 +38,11 @@ type sealer interface {
 type payload struct {
 	streamFrames []ackhandler.StreamFrame
 	frames       []ackhandler.Frame
-	ack          *wire.AckFrame
-	length       protocol.ByteCount
+	// The number of DATAGRAM frames in frames.
+	// DATAGRAM frames are the last frames in frames.
+	numDatagramFrames int
+	ack               *wire.AckFrame
+	length            protocol.ByteCount
 }
 
 type longHeaderPacket struct {
@@ -109,7 +112,8 @@ type sealingManager interface {
 
 type frameSource interface {
 	HasData() bool
-	Append([]ackhandler.Frame, []ackhandler.StreamFrame, protocol.ByteCount, monotime.Time, protocol.Version) ([]ackhandler.Frame, []ackhandler.StreamFrame, protocol.ByteCount)
+	AppendControlFrames([]ackhandler.Frame, protocol.ByteCount, monotime.Time, protocol.Version) ([]ackhandler.Frame, protocol.ByteCount)
+	AppendStreamFrames([]ackhandler.Frame, []ackhandler.StreamFrame, protocol.ByteCount, protocol.Version) ([]ackhandler.Frame, []ackhandler.StreamFrame, protocol.ByteCount)
 }
 
 type ackFrameSource interface {
@@ -212,23 +216,6 @@ func (p *packetPacker) packConnectionClose(
 		if p.perspective == protocol.PerspectiveServer && encLevel == protocol.Encryption0RTT {
 			continue
 		}
-		ccf := &wire.ConnectionCloseFrame{
-			IsApplicationError: isApplicationError,
-			ErrorCode:          errorCode,
-			FrameType:          frameType,
-			ReasonPhrase:       reason,
-		}
-		// don't send application errors in Initial or Handshake packets
-		if isApplicationError && (encLevel == protocol.EncryptionInitial || encLevel == protocol.EncryptionHandshake) {
-			ccf.IsApplicationError = false
-			ccf.ErrorCode = uint64(qerr.ApplicationErrorErrorCode)
-			ccf.ReasonPhrase = ""
-		}
-		pl := payload{
-			frames: []ackhandler.Frame{{Frame: ccf}},
-			length: ccf.Length(v),
-		}
-
 		var sealer sealer
 		var err error
 		switch encLevel {
@@ -253,6 +240,23 @@ func (p *packetPacker) packConnectionClose(
 			return nil, err
 		}
 		sealers[i] = sealer
+		ccf := &wire.ConnectionCloseFrame{
+			IsApplicationError: isApplicationError,
+			ErrorCode:          errorCode,
+			FrameType:          frameType,
+			ReasonPhrase:       reason,
+		}
+		// don't send application errors in Initial or Handshake packets
+		if isApplicationError && (encLevel == protocol.EncryptionInitial || encLevel == protocol.EncryptionHandshake) {
+			ccf.IsApplicationError = false
+			ccf.ErrorCode = uint64(qerr.ApplicationErrorErrorCode)
+			ccf.ReasonPhrase = ""
+		}
+		pl := payload{
+			frames: []ackhandler.Frame{{Frame: ccf}},
+			length: ccf.Length(v),
+		}
+
 		var hdr *wire.ExtendedHeader
 		if encLevel == protocol.Encryption1RTT {
 			connID = p.getDestConnID()
@@ -676,17 +680,10 @@ func (p *packetPacker) composeNextPacket(
 		}
 	}
 
-	if p.datagramQueue != nil {
-		limit := maxDatagramSendQueueLen
-		if hasData || hasRetransmission {
-			// Preserve the existing space available to reliable/control data.
-			limit = 1
-		}
-		pl = p.datagramQueue.appendDatagrams(pl, maxPayloadSize, limit, v, full)
-	}
-
-	if pl.ack != nil && !hasData && !hasRetransmission {
-		return pl
+	if hasData {
+		var lengthAdded protocol.ByteCount
+		pl.frames, lengthAdded = p.framer.AppendControlFrames(pl.frames, maxPayloadSize-pl.length, now, v)
+		pl.length += lengthAdded
 	}
 
 	if hasRetransmission {
@@ -704,25 +701,58 @@ func (p *packetPacker) composeNextPacket(
 		}
 	}
 
+	var lastDatagram *wire.DatagramFrame
+	if p.datagramQueue != nil {
+		startLen := len(pl.frames)
+		limit := maxDatagramSendQueueLen
+		if hasData || hasRetransmission {
+			limit = 1 // preserve reliable stream progress alongside tunnel datagrams
+		}
+		pl = p.datagramQueue.appendDatagrams(pl, maxPayloadSize, limit, v, full)
+		pl.numDatagramFrames += len(pl.frames) - startLen
+		if len(pl.frames) > startLen {
+			lastDatagram = pl.frames[len(pl.frames)-1].Frame.(*wire.DatagramFrame)
+		}
+	}
+
 	if hasData {
 		var lengthAdded protocol.ByteCount
 		startLen := len(pl.frames)
-		pl.frames, pl.streamFrames, lengthAdded = p.framer.Append(pl.frames, pl.streamFrames, maxPayloadSize-pl.length, now, v)
+		pl.frames, pl.streamFrames, lengthAdded = p.framer.AppendStreamFrames(pl.frames, pl.streamFrames, maxPayloadSize-pl.length, v)
 		pl.length += lengthAdded
-		// add handlers for the control frames that were added
-		for i := startLen; i < len(pl.frames); i++ {
-			if pl.frames[i].Handler != nil {
-				continue
-			}
-			switch pl.frames[i].Frame.(type) {
-			case *wire.PathChallengeFrame, *wire.PathResponseFrame:
-				// Path probing is currently not supported, therefore we don't need to set the OnAcked callback yet.
-				// PATH_CHALLENGE and PATH_RESPONSE are never retransmitted.
-			default:
-				// we might be packing a 0-RTT packet, but we need to use the 1-RTT ack handler anyway
-				pl.frames[i].Handler = p.retransmissionQueue.AckHandler(protocol.Encryption1RTT)
+		// Move STREAM_DATA_BLOCKED and DATA_BLOCKED frames in front of the DATAGRAM frames,
+		// such that the DATAGRAM frames remain the last frames.
+		if n := pl.numDatagramFrames; n > 0 {
+			for i := startLen; i < len(pl.frames); i++ {
+				f := pl.frames[i]
+				copy(pl.frames[i-n+1:i+1], pl.frames[i-n:i])
+				pl.frames[i-n] = f
 			}
 		}
+	}
+
+	// add handlers for the control frames that were added
+	for i := range pl.frames {
+		if pl.frames[i].Handler != nil {
+			continue
+		}
+		switch pl.frames[i].Frame.(type) {
+		case *wire.DatagramFrame:
+			// DATAGRAM frames are never retransmitted.
+		case *wire.PathChallengeFrame, *wire.PathResponseFrame:
+			// PATH_CHALLENGE and PATH_RESPONSE are never retransmitted.
+		default:
+			// we might be packing a 0-RTT packet, but we need to use the 1-RTT ack handler anyway
+			pl.frames[i].Handler = p.retransmissionQueue.AckHandler(protocol.Encryption1RTT)
+		}
+	}
+
+	// STREAM frames are serialized after all other frames.
+	// If there are none, the last DATAGRAM frame is the last frame in the packet, and doesn't need a length field.
+	if lastDatagram != nil && len(pl.streamFrames) == 0 {
+		pl.length -= lastDatagram.Length(v)
+		lastDatagram.DataLenPresent = false
+		pl.length += lastDatagram.Length(v)
 	}
 	return pl
 }
@@ -985,22 +1015,14 @@ func (p *packetPacker) appendPacketPayload(raw []byte, pl payload, paddingLen pr
 	}
 	// Randomize the order of the control frames.
 	// This makes sure that the receiver doesn't rely on the order in which frames are packed.
-	if len(pl.frames) > 1 {
-		datagrams := 0
-		for _, f := range pl.frames {
-			if _, ok := f.Frame.(*wire.DatagramFrame); ok {
-				datagrams++
-				if datagrams == 2 {
-					break
-				}
-			}
-		}
-		// Batching must not turn ready FIFO IP packets into artificial UDP
-		// reordering. Reliable/control work retains its existing randomization
-		// (and only admits one DATAGRAM above).
-		if datagrams < 2 {
-			p.rand.Shuffle(len(pl.frames), func(i, j int) { pl.frames[i], pl.frames[j] = pl.frames[j], pl.frames[i] })
-		}
+	// DATAGRAM frames are not shuffled, as this would reorder the datagrams delivered to the application.
+	// The last DATAGRAM frame also needs to stay at the end, since it might omit its length field.
+	toShuffle := pl.frames[:len(pl.frames)-pl.numDatagramFrames]
+	if len(toShuffle) > 1 {
+		p.rand.Shuffle(
+			len(toShuffle),
+			func(i, j int) { toShuffle[i], toShuffle[j] = toShuffle[j], toShuffle[i] },
+		)
 	}
 	for _, f := range pl.frames {
 		var err error
