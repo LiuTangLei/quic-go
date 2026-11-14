@@ -75,6 +75,8 @@ func TestConnectionMigrationThenMTUShrinkWithoutDF(t *testing.T) {
 				_ = client.RemoteAddr().String()
 				_ = server.LocalAddr().String()
 				_ = server.RemoteAddr().String()
+				_ = client.ConnectionState()
+				_ = server.ConnectionState()
 			}
 		}
 	}()
