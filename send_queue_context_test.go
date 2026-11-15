@@ -58,7 +58,7 @@ func TestSendQueueCloseCancelsBackpressuredWriter(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("close waited forever on relay queue")
 			}
-			if err := <-result; !errors.Is(err, context.Canceled) {
+			if err := <-result; err != nil {
 				t.Fatal(err)
 			}
 			if len(q.queue) != 0 {
@@ -66,4 +66,20 @@ func TestSendQueueCloseCancelsBackpressuredWriter(t *testing.T) {
 			}
 		})
 	}
+}
+
+type failingContextSendConn struct{ sendConn }
+
+func (*failingContextSendConn) contextBatchWriter() func(context.Context, [][]byte) error {
+	return func(context.Context, [][]byte) error { return errors.New("actual relay failure") }
+}
+func TestContextSendQueuePreservesActualWriteFailure(t *testing.T) {
+	q := newSendQueue(&failingContextSendConn{})
+	p := getPacketBuffer()
+	p.Data = append(p.Data[:0], 42)
+	q.Send(p, 0, protocol.ECNUnsupported)
+	if err := q.Run(); err == nil || err.Error() != "actual relay failure" {
+		t.Fatalf("lost genuine writer error: %v", err)
+	}
+	q.Close()
 }

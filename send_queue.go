@@ -23,15 +23,16 @@ type queueEntry struct {
 }
 
 type sendQueue struct {
-	queue       chan queueEntry
-	closeCalled chan struct{} // runStopped when Close() is called
-	runStopped  chan struct{} // runStopped when the run loop returns
-	available   chan struct{}
-	conn        sendConn
-	batchWrite  func([][]byte) error
-	cancelWrite context.CancelFunc
-	batchData   [][]byte                // owned by Run; cleared after every synchronous write
-	tooLarge    chan protocol.ByteCount // bounded report to the connection owner; never closed
+	queue        chan queueEntry
+	closeCalled  chan struct{} // runStopped when Close() is called
+	runStopped   chan struct{} // runStopped when the run loop returns
+	available    chan struct{}
+	conn         sendConn
+	batchWrite   func([][]byte) error
+	cancelWrite  context.CancelFunc
+	writeContext context.Context
+	batchData    [][]byte                // owned by Run; cleared after every synchronous write
+	tooLarge     chan protocol.ByteCount // bounded report to the connection owner; never closed
 }
 
 var _ sender = &sendQueue{}
@@ -42,12 +43,14 @@ const maxPortableBatchSize = 32
 func newSendQueue(conn sendConn) *sendQueue {
 	var batchWrite func([][]byte) error
 	var cancelWrite context.CancelFunc
+	var writeContext context.Context
 	if c, ok := conn.(interface {
 		contextBatchWriter() func(context.Context, [][]byte) error
 	}); ok {
 		if write := c.contextBatchWriter(); write != nil {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancelWrite = cancel
+			writeContext = ctx
 			batchWrite = func(p [][]byte) error { return write(ctx, p) }
 		}
 	}
@@ -67,15 +70,16 @@ func newSendQueue(conn sendConn) *sendQueue {
 		batchData = make([][]byte, capacity)
 	}
 	return &sendQueue{
-		batchWrite:  batchWrite,
-		cancelWrite: cancelWrite,
-		tooLarge:    make(chan protocol.ByteCount, 1),
-		batchData:   batchData,
-		conn:        conn,
-		runStopped:  make(chan struct{}),
-		closeCalled: make(chan struct{}),
-		available:   make(chan struct{}, 1),
-		queue:       make(chan queueEntry, capacity),
+		batchWrite:   batchWrite,
+		cancelWrite:  cancelWrite,
+		writeContext: writeContext,
+		tooLarge:     make(chan protocol.ByteCount, 1),
+		batchData:    batchData,
+		conn:         conn,
+		runStopped:   make(chan struct{}),
+		closeCalled:  make(chan struct{}),
+		available:    make(chan struct{}, 1),
+		queue:        make(chan queueEntry, capacity),
 	}
 }
 
@@ -141,6 +145,12 @@ func (h *sendQueue) Run() error {
 				// congestion accounting before these packets entered the queue.
 				err := h.writeReadyBatch(ready[:n])
 				if err != nil && !isSendMsgSizeErr(err) {
+					// Queue replacement during path migration also calls Close. Its
+					// intentional cancellation is not a transport failure and must not
+					// ask the owner to destroy an otherwise live QUIC connection.
+					if h.writeContext != nil && h.writeContext.Err() != nil {
+						return nil
+					}
 					return err
 				}
 				select {
