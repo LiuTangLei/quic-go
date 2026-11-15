@@ -28,7 +28,7 @@ func (h *sendQueue) writeReadyBatch(entries []queueEntry) error {
 			n++
 		}
 		var err error
-		if n == 1 {
+		if n == 1 && h.cancelWrite == nil {
 			err = h.conn.Write(data[0], 0, protocol.ECNUnsupported)
 		} else {
 			err = h.batchWrite(data[:n])

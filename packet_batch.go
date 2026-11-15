@@ -1,6 +1,9 @@
 package quic
 
-import "net"
+import (
+	"context"
+	"net"
+)
 
 // PacketBatchWriter is an optional capability of a non-OOB net.PacketConn.
 // Each slice is one already-protected UDP datagram, not a GSO super-packet.
@@ -10,6 +13,15 @@ import "net"
 // This interface neither enables nor advertises GSO, ECN or DF support.
 type PacketBatchWriter interface {
 	WritePacketBatch(packets [][]byte, addr net.Addr) error
+}
+
+// ContextPacketBatchWriter permits a bounded, backpressured relay writer. The
+// context is canceled when this connection's send queue closes. Cancellation
+// must unblock a pending write without closing a shared PacketConn or replaying
+// a partially sent batch. Ordinary PacketBatchWriter implementations are unchanged.
+type ContextPacketBatchWriter interface {
+	PacketBatchWriter
+	WritePacketBatchContext(context.Context, [][]byte, net.Addr) error
 }
 
 // PacketBatchSizer optionally opts a portable writer into larger ready batches.
@@ -44,5 +56,20 @@ func (c *sconn) batchWriter() func([][]byte) error {
 	return func(packets [][]byte) error {
 		target := c.remoteAddrInfo.Load()
 		return writer.WritePacketBatch(packets, target.addr)
+	}
+}
+
+func (c *sconn) contextBatchWriter() func(context.Context, [][]byte) error {
+	basic, ok := c.rawConn.(*basicConn)
+	if !ok {
+		return nil
+	}
+	writer, ok := basic.PacketConn.(ContextPacketBatchWriter)
+	if !ok {
+		return nil
+	}
+	return func(ctx context.Context, packets [][]byte) error {
+		target := c.remoteAddrInfo.Load()
+		return writer.WritePacketBatchContext(ctx, packets, target.addr)
 	}
 }

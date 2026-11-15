@@ -1,6 +1,7 @@
 package quic
 
 import (
+	"context"
 	"net"
 
 	"github.com/quic-go/quic-go/internal/protocol"
@@ -28,6 +29,7 @@ type sendQueue struct {
 	available   chan struct{}
 	conn        sendConn
 	batchWrite  func([][]byte) error
+	cancelWrite context.CancelFunc
 	batchData   [][]byte                // owned by Run; cleared after every synchronous write
 	tooLarge    chan protocol.ByteCount // bounded report to the connection owner; never closed
 }
@@ -39,7 +41,17 @@ const maxPortableBatchSize = 32
 
 func newSendQueue(conn sendConn) *sendQueue {
 	var batchWrite func([][]byte) error
-	if c, ok := conn.(interface{ batchWriter() func([][]byte) error }); ok {
+	var cancelWrite context.CancelFunc
+	if c, ok := conn.(interface {
+		contextBatchWriter() func(context.Context, [][]byte) error
+	}); ok {
+		if write := c.contextBatchWriter(); write != nil {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancelWrite = cancel
+			batchWrite = func(p [][]byte) error { return write(ctx, p) }
+		}
+	}
+	if c, ok := conn.(interface{ batchWriter() func([][]byte) error }); ok && batchWrite == nil {
 		batchWrite = c.batchWriter()
 	}
 	capacity := sendQueueCapacity
@@ -56,6 +68,7 @@ func newSendQueue(conn sendConn) *sendQueue {
 	}
 	return &sendQueue{
 		batchWrite:  batchWrite,
+		cancelWrite: cancelWrite,
 		tooLarge:    make(chan protocol.ByteCount, 1),
 		batchData:   batchData,
 		conn:        conn,
@@ -156,9 +169,26 @@ func (h *sendQueue) Run() error {
 }
 
 func (h *sendQueue) Close() {
+	// A relay can stop consuming its bounded queue. Wake its in-flight write
+	// before joining the sender; never close a socket shared by other peers.
+	if h.cancelWrite != nil {
+		h.cancelWrite()
+	}
 	close(h.closeCalled)
 	// wait until the run loop returned
 	<-h.runStopped
+	if h.cancelWrite != nil {
+		// The owner no longer enqueues after Close. Canceled writes may leave
+		// accepted packets behind; release them exactly once without replay.
+		for {
+			select {
+			case e := <-h.queue:
+				e.buf.Release()
+			default:
+				return
+			}
+		}
+	}
 }
 
 // GSO errors concern one UDP segment, not the combined host write size.
